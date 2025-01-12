@@ -1,66 +1,16 @@
-#State Machine
-tood; 
+# What is this project?
 
-05010906A1018501050719E029E7150025017501950881029505050819012905910295017503910195067508150026A400050719002AA4008100C0050C0901A101850375109502150126FF0219012AFF028160C00643FF0A0202A101851175089513150026FF000902810009029100C0
+This project allows you to apply macros to keyboards before they even reach your computer, with no noticeable delay. 
 
+This is especially useful to address issues such as
+- remapping any keys 
+  - ANY key: windows, command, alt, etc
+  - done before it reaches the computer, so you can rebind keys without original shortcuts triggering 
+- avoid security concerns with programs downloaded on the internet
+  - this code is all hacked together from the btstack repo examples, and doesn't contain any capability to connect to the internet. All the code is in one file and (relatively) easy to follow.
 
-05 01
-09 06
-A1 01
-85 01
-05 07
-19 E0
-29 E7
-15 00
-25 01
-75 01
-95 08 
-81 02
-
-95 05
-05 08
-19 01 
-29 05 
-91 02 
-
-95 01 
-75 03 
-91 01 
-
-95 06 
-75 08 
-15 00
-26 A4 00 
-05 07 
-19 00 
-2A A4 00
-
-81 0
-
-C0 
-05 0C 
-09 01 
-A1 01 
-85 03 
-75 10 
-95 02 
-15 01 
-26 FF 02 
-19 01 
-2A FF 02 
-81 60 
-C0 
-
-06 43 FF 
-0A 02 02 
-A1 01 
-85 11 
-75 08 
-95 13 
-15 00 
-26 FF 00 
-09 02 
-81 00 
-09 02 
-91 00 
-C0
+future additions
+- activity tracking
+- mouse rebindings
+- improved security in pairing (code request)
+- support for mimicing the captured keyboard's BT advertisements
