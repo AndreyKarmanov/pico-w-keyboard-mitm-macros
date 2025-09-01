@@ -323,7 +323,7 @@ static void apply_macros(const uint8_t modifiers, const uint8_t* keycodes, uint1
                 keycode = 0x4F;
             } else if (keycode == 0x1A || keycode == 0x0C) { // caps + (w || i) = up arrow
                 keycode = 0x52;
-            } else if (keycode == 0x0E || keycode == 0x0E) { // caps + (s || k) = down arrow
+            } else if (keycode == 0x16 || keycode == 0x0E) { // caps + (s || k) = down arrow
                 keycode = 0x51;
             } else if (keycode == 0x1C) { // y = volume up
                 keycode = 0x80;
