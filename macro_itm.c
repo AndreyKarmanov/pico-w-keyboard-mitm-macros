@@ -45,12 +45,12 @@
 #include "pico/cyw43_arch.h"
 #include "pico/stdio.h"
 #include "pico/time.h"
+#include "hardware/flash.h"
 
 #include "macro_itm.h"
 #include "btstack_config.h"
 #include "btstack.h"
 
-#include "ble/gatt-service/battery_service_server.h"
 #include "ble/gatt-service/device_information_service_server.h"
 #include "ble/gatt-service/hids_device.h"
 // Simplified US Keyboard with Shift modifier
@@ -152,7 +152,6 @@ static const btstack_tlv_t *btstack_tlv_singleton_impl;
 static void *btstack_tlv_singleton_context;
 
 // host (pc) (outgoing) vars
-static uint8_t battery = 100;
 const uint8_t adv_data[] = {
     // Flags general discoverable, BR/EDR not supported
     0x02,
@@ -325,8 +324,8 @@ static void apply_macros(const uint8_t modifiers, const uint8_t *keycodes, uint1
 {
   // this takes in the modifiers + keycodes, and then updates out_report based on them.
   // out_report is then sent to the host
-  // printf("applying macros\n%02x ", modifiers);
-  // human_readable_report(keycodes, keycodes_len);
+  printf("applying macros\n%02x ", modifiers);
+  human_readable_report(keycodes, keycodes_len);
 
   out_report[0] = modifiers; // modifiers are unchanged
 
@@ -378,14 +377,13 @@ static void apply_macros(const uint8_t modifiers, const uint8_t *keycodes, uint1
     out_report[1 + out_keycodes_len++] = keycode;
   }
 
-  // human_readable_report(out_report, sizeof(out_report));
+  human_readable_report(out_report, sizeof(out_report));
   hids_device_request_can_send_now_event(con_handle_host);
 }
 
 /*
     START OF INCOMING (KEYBOARD) CODE
 */
-
 static void hid_handle_input_report(uint8_t service_index, const uint8_t *report, uint16_t report_len)
 {
   // check if HID Input Report
@@ -393,7 +391,7 @@ static void hid_handle_input_report(uint8_t service_index, const uint8_t *report
     return;
   if (app_state != APP_STATE_READY)
   {
-    // printf("HID Input Report, but not ready, ignoring\n");
+    printf("HID Input Report, but not ready, ignoring\n");
     return;
   }
   switch (protocol_mode_incoming)
@@ -428,7 +426,7 @@ static void app_set_state(app_state_t new_state); // forward
 static void hog_start_scan(void)
 {
   // May be called internally by state transition helper
-  // printf("[STATE] -> SCANNING_FOR_KEYBOARD (start scan)\n");
+  printf("[STATE] -> SCANNING_FOR_KEYBOARD (start scan)\n");
   // Passive scanning, 100% (scan interval = scan window)
   gap_set_scan_parameters(0, 48, 48);
   gap_start_scan();
@@ -441,7 +439,7 @@ static void hog_start_scan(void)
 static void hog_connection_timeout(btstack_timer_source_t *ts)
 {
   UNUSED(ts);
-  // printf("Keyboard connection timeout - abort and rescan\n");
+  printf("Keyboard connection timeout - abort and rescan\n");
   gap_connect_cancel();
   app_set_state(APP_STATE_SCANNING_FOR_KEYBOARD);
 }
@@ -451,7 +449,7 @@ static void hog_connection_timeout(btstack_timer_source_t *ts)
  */
 static void hog_connect(void)
 {
-  // printf("Connecting to keyboard %s ...\n", bd_addr_to_str(remote_device_keyboard.addr));
+  printf("Connecting to keyboard %s ...\n", bd_addr_to_str(remote_device_keyboard.addr));
   // connection & security phases follow
   keyboard_conn_phase = KEYBOARD_CONN_WAIT_ENCRYPTION;
   btstack_run_loop_set_timer(&connection_timer, 10000); // 10s timeout
@@ -491,7 +489,7 @@ static void hog_start_connect(void)
     int len = btstack_tlv_singleton_impl->get_tag(btstack_tlv_singleton_context, TLV_TAG_HOGD, (uint8_t *)&remote_device_keyboard, sizeof(remote_device_keyboard));
     if (len == sizeof(remote_device_keyboard))
     {
-      // printf("Found bonded keyboard (%s) %s - attempting reconnect\n", remote_device_keyboard.addr_type == 0 ? "public" : "random", bd_addr_to_str(remote_device_keyboard.addr));
+      printf("Found bonded keyboard (%s) %s - attempting reconnect\n", remote_device_keyboard.addr_type == 0 ? "public" : "random", bd_addr_to_str(remote_device_keyboard.addr));
       app_set_state(APP_STATE_CONNECTING_TO_KEYBOARD);
       return;
     }
@@ -504,7 +502,7 @@ static void hog_start_connect(void)
  */
 static void handle_outgoing_connection_error(void)
 {
-  // printf("Error occurred with keyboard connection; restarting scan\n");
+  printf("Error occurred with keyboard connection; restarting scan\n");
   if (con_handle_keyboard != HCI_CON_HANDLE_INVALID)
   {
     gap_disconnect(con_handle_keyboard);
@@ -524,7 +522,7 @@ static void send_report()
   case 0:
     out_boot_report[0] = out_report[0];
     memcpy(out_boot_report + 2, out_report + 1, 6);
-    // printf("Sending boot report\n");
+    printf("Sending boot report\n");
     human_readable_report(out_boot_report, sizeof(out_boot_report));
     hids_device_send_boot_keyboard_input_report(con_handle_host, out_report, sizeof(out_report));
     break;
@@ -564,7 +562,7 @@ static void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint
     switch (status)
     {
     case ERROR_CODE_SUCCESS:
-      // printf("HID service client connected, found %d services\n", gattservice_subevent_hid_service_connected_get_num_instances(packet));
+      printf("HID service client connected, found %d services\n", gattservice_subevent_hid_service_connected_get_num_instances(packet));
 
       // store device as bonded
       if (btstack_tlv_singleton_impl)
@@ -572,20 +570,20 @@ static void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint
         btstack_tlv_singleton_impl->store_tag(btstack_tlv_singleton_context, TLV_TAG_HOGD, (const uint8_t *)&remote_device_keyboard, sizeof(remote_device_keyboard));
       }
       // done
-      // printf("Keyboard services ready\n");
+      printf("Keyboard services ready\n");
       // Transition: CONNECTING_TO_KEYBOARD -> KEYBOARD_CONNECTED -> ADVERTISING_TO_HOST
       app_set_state(APP_STATE_KEYBOARD_CONNECTED);
       app_set_state(APP_STATE_ADVERTISING_TO_HOST);
       break;
     default:
-      // printf("HID service client connection failed, status 0x%02x.\n", status);
+      printf("HID service client connection failed, status 0x%02x.\n", status);
       handle_outgoing_connection_error();
       break;
     }
     break;
 
   case GATTSERVICE_SUBEVENT_HID_SERVICE_DISCONNECTED:
-    // printf("HID service client disconnected\n");
+    printf("HID service client disconnected\n");
     // lost keyboard while connecting/ready; state machine will manage
     if (con_handle_keyboard != HCI_CON_HANDLE_INVALID)
     {
@@ -640,7 +638,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
     uint16_t con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
     if (con_handle == con_handle_host)
     {
-      // printf("Host disconnected\n");
+      printf("Host disconnected\n");
       con_handle_host = HCI_CON_HANDLE_INVALID;
       if (app_state == APP_STATE_READY)
       {
@@ -649,12 +647,12 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
     }
     else if (con_handle == con_handle_keyboard)
     {
-      // printf("Keyboard disconnected\n");
+      printf("Keyboard disconnected\n");
       con_handle_keyboard = HCI_CON_HANDLE_INVALID;
       // disconnect host if present because we can't forward anymore
       if (con_handle_host != HCI_CON_HANDLE_INVALID)
       {
-        // printf("Disconnecting host due to keyboard loss\n");
+        printf("Disconnecting host due to keyboard loss\n");
         gap_disconnect(con_handle_host);
         con_handle_host = HCI_CON_HANDLE_INVALID;
       }
@@ -681,7 +679,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
     {
     case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
       con_handle_host = hids_subevent_input_report_enable_get_con_handle(packet);
-      // printf("Report Characteristic Subscribed %u\n", hids_subevent_input_report_enable_get_enable(packet));
+      printf("Report Characteristic Subscribed %u\n", hids_subevent_input_report_enable_get_enable(packet));
       if (hids_subevent_input_report_enable_get_enable(packet))
       {
         if (app_state == APP_STATE_ADVERTISING_TO_HOST)
@@ -701,13 +699,13 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
       // not sure if it's needed here
       con_handle_host = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
-      // printf("Boot Keyboard Characteristic Subscribed %u\n", hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
+      printf("Boot Keyboard Characteristic Subscribed %u\n", hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
       break;
     case HIDS_SUBEVENT_PROTOCOL_MODE:
       // 0 = Boot Protocol Mode, 1 = Report Protocol Mode
       // mostly debug info
       protocol_mode_host = hids_subevent_protocol_mode_get_protocol_mode(packet);
-      // printf("Protocol Mode: %s mode\n", hids_subevent_protocol_mode_get_protocol_mode(packet) ? "Report" : "Boot");
+      printf("Protocol Mode: %s mode\n", hids_subevent_protocol_mode_get_protocol_mode(packet) ? "Report" : "Boot");
       break;
     case HIDS_SUBEVENT_CAN_SEND_NOW:
       // should be in READY state
@@ -746,41 +744,41 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
   switch (hci_event_packet_get_type(packet))
   {
   case SM_EVENT_JUST_WORKS_REQUEST:
-    // printf("Just works requested\n");
+    printf("Just works requested\n");
     sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
     break;
   case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
-    // printf("Confirming numeric comparison: %"PRIu32"\n", sm_event_numeric_comparison_request_get_passkey(packet));
+    printf("Confirming numeric comparison: %"PRIu32"\n", sm_event_numeric_comparison_request_get_passkey(packet));
     sm_numeric_comparison_confirm(sm_event_passkey_display_number_get_handle(packet));
     break;
   case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
-    // printf("Display Passkey: %"PRIu32"\n", sm_event_passkey_display_number_get_passkey(packet));
+    printf("Display Passkey: %"PRIu32"\n", sm_event_passkey_display_number_get_passkey(packet));
     break;
   case SM_EVENT_PAIRING_COMPLETE:
     switch (sm_event_pairing_complete_get_status(packet))
     {
     case ERROR_CODE_SUCCESS:
-      // printf("Pairing complete, success\n");
+      printf("Pairing complete, success\n");
       if (app_state == APP_STATE_CONNECTING_TO_KEYBOARD && keyboard_conn_phase == KEYBOARD_CONN_WAIT_ENCRYPTION)
       {
         continue_keyboard_connect = true;
       }
       break;
     case ERROR_CODE_CONNECTION_TIMEOUT:
-      // printf("Pairing failed, timeout\n");
+      printf("Pairing failed, timeout\n");
       break;
     case ERROR_CODE_REMOTE_USER_TERMINATED_CONNECTION:
-      // printf("Pairing failed, disconnected\n");
+      printf("Pairing failed, disconnected\n");
       break;
     case ERROR_CODE_AUTHENTICATION_FAILURE:
-      // printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_reason(packet));
+      printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_reason(packet));
       break;
     default:
       break;
     }
     break;
   case SM_EVENT_REENCRYPTION_COMPLETE:
-    // printf("Re-encryption complete, success\n");
+    printf("Re-encryption complete, success\n");
     if (app_state == APP_STATE_CONNECTING_TO_KEYBOARD && keyboard_conn_phase == KEYBOARD_CONN_WAIT_ENCRYPTION)
     {
       continue_keyboard_connect = true;
@@ -792,7 +790,7 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
 
   if (continue_keyboard_connect)
   {
-    // printf("Search for HID service (HIDS Client connect)\n");
+    printf("Search for HID service (HIDS Client connect)\n");
     keyboard_conn_phase = KEYBOARD_CONN_WAIT_HIDS_CLIENT;
     hids_client_connect(con_handle_keyboard, handle_gatt_client_event, protocol_mode_incoming, &hids_cid);
   }
@@ -807,7 +805,7 @@ static void app_set_state(app_state_t new_state)
     return;
   app_state_t old = app_state;
   app_state = new_state;
-  // printf("[STATE] %d -> %d\n", old, new_state);
+  printf("[STATE] %d -> %d\n", old, new_state);
 
   switch (new_state)
   {
@@ -859,7 +857,6 @@ int btstack_main(int argc, const char *argv[])
   hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
 
   // out
-  battery_service_server_init(battery);
   device_information_service_server_init();
   hids_device_init(0, hid_descriptor_keyabord_mx_mechanical, sizeof(hid_descriptor_keyabord_mx_mechanical));
 
@@ -899,11 +896,12 @@ int main(int argc, const char *argv[])
 
   if (cyw43_arch_init())
   {
-    // printf("failed to initialise cyw43_arch\n");
+    printf("failed to initialise cyw43_arch\n");
     return -1;
   }
-
+  
   btstack_main(argc, argv);
-
+  
+  cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
   btstack_run_loop_execute();
 }
