@@ -158,7 +158,7 @@ const uint8_t adv_data[] = {
     BLUETOOTH_DATA_TYPE_FLAGS,
     0x06,
     // Name
-    0x0d,
+    0x0e,
     BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME,
     'M',
     'I',
@@ -172,6 +172,7 @@ const uint8_t adv_data[] = {
     'o',
     'a',
     'r',
+    'd',
     // 16-bit Service UUIDs
     0x03,
     BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
@@ -879,9 +880,6 @@ int btstack_main(int argc, const char *argv[])
 
   hids_device_register_packet_handler(hci_packet_handler);
 
-  // Disable stdout buffering
-  setvbuf(stdin, NULL, _IONBF, 0);
-
   app_state = APP_STATE_DISCONNECTED;
 
   // Turn on the device
@@ -899,7 +897,7 @@ int main(int argc, const char *argv[])
     printf("failed to initialise cyw43_arch\n");
     return -1;
   }
-  
+
   btstack_main(argc, argv);
   
   cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
