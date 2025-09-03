@@ -1,14 +1,15 @@
 PRIMARY_SERVICE, GAP_SERVICE
-CHARACTERISTIC, GAP_DEVICE_NAME, READ, "MITM Keyboard"
-
-// add Battery Service
-#import <battery_service.gatt>
+CHARACTERISTIC, GAP_DEVICE_NAME, READ, "MITM"
 
 // add Device ID Service
-#import <device_information_service.gatt>
+// #import <device_information_service.gatt>
 
 // add HID Service
-#import <hids.gatt>
+// #import <hids.gatt>
 
 PRIMARY_SERVICE, GATT_SERVICE
 CHARACTERISTIC, GATT_DATABASE_HASH, READ,
+
+// Custom Service to configure MITM
+PRIMARY_SERVICE, 12345678-90AB-CDEF-0123-456789ABCDEF
+CHARACTERISTIC, 12345678-90AB-CDEF-0123-456789ABCDF0, READ | WRITE_WITHOUT_RESPONSE | DYNAMIC

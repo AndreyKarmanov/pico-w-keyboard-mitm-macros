@@ -12,12 +12,10 @@
 #define ENABLE_PRINTF_HEXDUMP
 // #define ENABLE_TESTING_SUPPORT // HID debug printing
 
-
 // config
 #define ENABLE_LE_CENTRAL
 #define MAX_NR_GATT_CLIENTS 1
 #define MAX_NR_HIDS_CLIENTS 1
-
 
 // BTstack configuration. buffers, sizes, ...
 #define HCI_OUTGOING_PRE_BUFFER_SIZE 4
@@ -41,15 +39,16 @@
 
 // Link Key DB and LE Device DB using TLV on top of Flash Sector interface
 #define NVM_NUM_DEVICE_DB_ENTRIES 16
-#define NVM_NUM_LINK_KEYS 16
 
 // We don't give btstack a malloc, so use a fixed-size ATT DB.
 #define MAX_ATT_DB_SIZE 512
 
 // BTstack HAL configuration
 #define HAVE_EMBEDDED_TIME_MS
+
 // map btstack_assert onto Pico SDK assert()
 #define HAVE_ASSERT
+
 // Some USB dongles take longer to respond to HCI reset (e.g. BCM20702A).
 #define HCI_RESET_RESEND_TIMEOUT_MS 1000
 #define ENABLE_SOFTWARE_AES128

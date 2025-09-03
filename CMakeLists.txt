@@ -15,9 +15,9 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.1.0)
+set(sdkVersion 2.2.0)
 set(toolchainVersion 13_3_Rel1)
-set(picotoolVersion 2.1.0)
+set(picotoolVersion 2.2.0)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
@@ -41,14 +41,13 @@ pico_set_program_name(macro_itm "macro_itm")
 pico_set_program_version(macro_itm "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(macro_itm 0)
-pico_enable_stdio_usb(macro_itm 1)
+pico_enable_stdio_uart(macro_itm 1)
+pico_enable_stdio_usb(macro_itm 0)
 
 # Add the standard library to the build
 target_link_libraries(macro_itm
     pico_stdlib
     pico_btstack_ble
-    pico_btstack_classic
     pico_btstack_cyw43
     pico_cyw43_arch_none
 )
@@ -61,4 +60,3 @@ target_include_directories(macro_itm PRIVATE
 pico_btstack_make_gatt_header(macro_itm PRIVATE "${CMAKE_CURRENT_LIST_DIR}/macro_itm.gatt")
 
 pico_add_extra_outputs(macro_itm)
-
