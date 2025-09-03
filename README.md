@@ -15,6 +15,15 @@ future additions
 - improved security in pairing (code request)
 - support for mimicing the captured keyboard's BT advertisements
 
+
+# TODOs
+- [ ] configuration UI for choosing a device to connect to (via index.html)
+- [ ] configuration UI for setting up macros (open a basic index.html and use bluetooth api to adjust)
+- [ ] store macros in NVM
+- [ ] properly mirror keyboard's reports & advertisements
+  - [ ] support for multiple keyboards/layouts
+
+
 ## Architecture
 
 Here is a state diagram outlining the desired robust architecture for handling connections and disconnections:
