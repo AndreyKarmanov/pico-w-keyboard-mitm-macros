@@ -94,7 +94,7 @@ typedef enum {
 } app_state_t;
 
 static uint16_t devices_found;
-static device_info_t devices[MAX_NUM_DEVICES];
+static device_info_t devices[MAX_SEEN_DEVICES];
 
 static uint16_t         remote_peripheral_index;
 static bd_addr_t        remote_peripheral_addr;
@@ -320,7 +320,7 @@ static void mitm_handle_adv(uint8_t * packet){
         break;
     }
 
-    if (i == MAX_NUM_DEVICES) return;
+    if (i == MAX_SEEN_DEVICES) return;
 
     if (devices_found == i){
         // skip first event with scan response data (should not happen)

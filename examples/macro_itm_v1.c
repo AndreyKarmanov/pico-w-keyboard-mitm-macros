@@ -148,8 +148,8 @@ static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
 // tlv stuff
 #define TLV_TAG_HOGD ((((uint32_t)'H') << 24) | (((uint32_t)'O') << 16) | (((uint32_t)'G') << 8) | 'D')
-static const btstack_tlv_t *btstack_tlv_singleton_impl;
-static void *btstack_tlv_singleton_context;
+static const btstack_tlv_t *tlv_impl;
+static void *tlv_context;
 
 // host (pc) (outgoing) vars
 const uint8_t adv_data[] = {
@@ -484,10 +484,10 @@ static void hog_reconnect_timeout(btstack_timer_source_t *ts)
 static void hog_start_connect(void)
 {
   // check if we have a bonded HID device
-  btstack_tlv_get_instance(&btstack_tlv_singleton_impl, &btstack_tlv_singleton_context);
-  if (btstack_tlv_singleton_impl)
+  btstack_tlv_get_instance(&tlv_impl, &tlv_context);
+  if (tlv_impl)
   {
-    int len = btstack_tlv_singleton_impl->get_tag(btstack_tlv_singleton_context, TLV_TAG_HOGD, (uint8_t *)&remote_device_keyboard, sizeof(remote_device_keyboard));
+    int len = tlv_impl->get_tag(tlv_context, TLV_TAG_HOGD, (uint8_t *)&remote_device_keyboard, sizeof(remote_device_keyboard));
     if (len == sizeof(remote_device_keyboard))
     {
       printf("Found bonded keyboard (%s) %s - attempting reconnect\n", remote_device_keyboard.addr_type == 0 ? "public" : "random", bd_addr_to_str(remote_device_keyboard.addr));
@@ -566,9 +566,9 @@ static void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint
       printf("HID service client connected, found %d services\n", gattservice_subevent_hid_service_connected_get_num_instances(packet));
 
       // store device as bonded
-      if (btstack_tlv_singleton_impl)
+      if (tlv_impl)
       {
-        btstack_tlv_singleton_impl->store_tag(btstack_tlv_singleton_context, TLV_TAG_HOGD, (const uint8_t *)&remote_device_keyboard, sizeof(remote_device_keyboard));
+        tlv_impl->store_tag(tlv_context, TLV_TAG_HOGD, (const uint8_t *)&remote_device_keyboard, sizeof(remote_device_keyboard));
       }
       // done
       printf("Keyboard services ready\n");
@@ -831,6 +831,24 @@ static void app_set_state(app_state_t new_state)
   case APP_STATE_DISCONNECTED:
   default:
     break;
+  }
+}
+
+// Simple regression helper: write & read back a TLV value
+static void tlv_writing_test(void)
+{
+  if (!tlv_impl) {
+    printf("tlv_writing_test: TLV impl not set yet\n");
+    return;
+  }
+  const char* test_string = "Hello TLV";
+  uint8_t buf[64];
+  tlv_impl->store_tag(tlv_context, 0x01, (const uint8_t*)test_string, (uint32_t)strlen(test_string));
+  int len = tlv_impl->get_tag(tlv_context, 0x01, buf, sizeof(buf));
+  if (len > 0) {
+    printf("tlv_writing_test: tag 0x01 len %d value '%.*s'\n", len, len, buf);
+  } else {
+    printf("tlv_writing_test: failed to read back tag 0x01 (len=%d)\n", len);
   }
 }
 

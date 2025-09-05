@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Web Bluetooth Demo</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2em; }
+    #devices, #characteristics { margin-top: 1em; }
+    .char-row { margin-bottom: 1em; }
+    label { margin-right: 0.5em; }
+    input[type="text"] { width: 200px; }
+    button { margin-left: 0.5em; }
+    .hex { font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>Web Bluetooth Demo</h1>
+  <label for="servicesInput">Optional Services (comma-separated UUIDs):</label>
+  <input type="text" id="servicesInput" placeholder="e.g. 0000180a-0000-1000-8000-00805f9b34fb, heart_rate" style="width: 400px;">
+  <button id="searchBtn">Search for Bluetooth Devices</button>
+  <div id="devices"></div>
+  <div id="characteristics"></div>
+
+  <script>
+    let device, server, service, characteristics = [];
+
+    document.getElementById('searchBtn').onclick = async () => {
+      try {
+        const servicesInput = document.getElementById('servicesInput').value.trim();
+        const optionalServices = servicesInput ? servicesInput.split(',').map(s => s.trim()) : [];
+        
+        // Add some default services if none are provided, to still find common devices
+        if (optionalServices.length === 0) {
+          optionalServices.push('generic_access', 'generic_attribute');
+        }
+
+        device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: optionalServices
+        });
+        document.getElementById('devices').innerHTML =
+          `<strong>Selected Device:</strong> ${device.name || device.id}
+           <button id="connectBtn">Connect & List Characteristics</button>`;
+        document.getElementById('characteristics').innerHTML = '';
+        document.getElementById('connectBtn').onclick = connectAndListCharacteristics;
+      } catch (err) {
+        alert('Error: ' + err);
+      }
+    };
+
+    async function connectAndListCharacteristics() {
+      try {
+        server = await device.gatt.connect();
+        let services = await server.getPrimaryServices();
+        let servicesHtml = '<h2>Services & Characteristics</h2>';
+        characteristics = [];
+        for (let s of services) {
+          servicesHtml += `<h3>Service: ${s.uuid}</h3>`;
+          let chars = await s.getCharacteristics();
+          for (let c of chars) {
+            characteristics.push(c);
+            let charIndex = characteristics.length - 1;
+            servicesHtml += `
+              <div class="char-row">
+                <strong>Characteristic UUID:</strong> ${c.uuid}
+                <button onclick="readCharacteristic(${charIndex})">Read</button>
+                <input type="text" id="writeVal${charIndex}" placeholder="Write value">
+                <select id="writeType${charIndex}">
+                  <option value="utf8">UTF-8</option>
+                  <option value="hex">HEX</option>
+                </select>
+                <button onclick="writeCharacteristic(${charIndex})">Write</button>
+                <div id="charVal${charIndex}"></div>
+              </div>
+            `;
+          }
+        }
+        document.getElementById('characteristics').innerHTML = servicesHtml;
+        window.readCharacteristic = readCharacteristic;
+        window.writeCharacteristic = writeCharacteristic;
+      } catch (err) {
+        alert('Error: ' + err);
+      }
+    }
+
+    async function readCharacteristic(idx) {
+      try {
+        let value = await characteristics[idx].readValue();
+        let arr = [];
+        for (let i = 0; i < value.byteLength; i++) arr.push(value.getUint8(i));
+        let utf8 = new TextDecoder().decode(value.buffer);
+        let hex = arr.map(b => b.toString(16).padStart(2, '0')).join(' ');
+        document.getElementById('charVal' + idx).innerHTML =
+          `<div><strong>UTF-8:</strong> ${utf8}</div>
+           <div class="hex"><strong>HEX:</strong> ${hex}</div>`;
+      } catch (err) {
+        alert('Read error: ' + err);
+      }
+    }
+
+    async function writeCharacteristic(idx) {
+      try {
+        let val = document.getElementById('writeVal' + idx).value;
+        let type = document.getElementById('writeType' + idx).value;
+        let buffer;
+        if (type === 'utf8') {
+          buffer = new TextEncoder().encode(val);
+        } else {
+          // HEX: "01 02 03" or "010203"
+          let hex = val.replace(/[\s,]/g, '');
+          if (hex.length % 2 !== 0) throw 'HEX must have even length';
+          buffer = new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+        }
+        await characteristics[idx].writeValue(buffer);
+        alert('Write successful');
+      } catch (err) {
+        alert('Write error: ' + err);
+      }
+    }
+  </script>
+</body>
+</html>
