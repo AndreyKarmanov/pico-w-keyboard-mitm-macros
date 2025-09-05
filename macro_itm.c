@@ -15,19 +15,24 @@
 #include "pico/time.h"
 
 typedef enum {
-  APP_STATE_IDLE = 0,    // No connections active yet (BT stack not ready)
-  APP_STATE_ADVERTISING, // Advertising to host, awaiting subscription
+  APP_STATE_IDLE = 0,
+  APP_STATE_ADVERTISING,
+  APP_STATE_CONNECTING_TARGET,
+  APP_STATE_TARGET_CONNECTED,
 } app_state_t;
 
 static app_state_t app_state;
 
 static const char* app_state_strings[] = {
-    "IDLE",
-    "ADVERTISING",
+  "IDLE",
+  "ADVERTISING",
+  "CONNECTING_TARGET",
+  "TARGET_CONNECTED",
 };
 
 #define MAX_SEEN_DEVICES 32
 bd_addr_t seen_device_addrs[MAX_SEEN_DEVICES];
+static uint8_t seen_device_types[MAX_SEEN_DEVICES];
 static char* seen_device_names[MAX_SEEN_DEVICES];
 static int seen_devices_count = 0;
 
@@ -41,7 +46,17 @@ static btstack_packet_callback_registration_t sm_event_callback_registration;
 static const btstack_tlv_t* tlv_impl;
 static void* tlv_context;
 
-static hci_con_handle_t con_handle_host = HCI_CON_HANDLE_INVALID;
+// TLV tag for target device ('TRGT')
+#define TLV_TAG_TARGET_DEVICE 0x54524754u
+
+typedef struct {
+  bd_addr_t addr;
+  uint8_t addr_type;
+  uint8_t valid;
+} target_device_t;
+
+static target_device_t target_device = { {0}, 0, 0 };
+static hci_con_handle_t con_handle_target = HCI_CON_HANDLE_INVALID;
 
 // Config Advertisement Data
 const uint8_t config_adv_data[] = {
@@ -63,15 +78,52 @@ const uint8_t config_adv_data_len = sizeof(config_adv_data);
 
 static void app_set_state(app_state_t new_state)
 {
-  if (new_state == app_state)
-    return;
+  if (new_state == app_state) return;
   printf("[STATE] %s -> %s\n", app_state_strings[app_state], app_state_strings[new_state]);
   app_state = new_state;
 }
 
-static void save_found_device(bd_addr_t addr, const uint8_t* adv_data, uint8_t adv_size)
-{
 
+// Attempt connection to selected target (called after seeing advertisement or setting target)
+static void attempt_target_connection(void)
+{
+  if (!target_device.valid) return;
+  if (con_handle_target != HCI_CON_HANDLE_INVALID) return;
+  printf("Attempting connection to target %s (type=%u)\n", bd_addr_to_str(target_device.addr), target_device.addr_type);
+  gap_stop_scan();
+  app_set_state(APP_STATE_CONNECTING_TARGET);
+  gap_connect(target_device.addr, target_device.addr_type);
+}
+
+// Very simple parser: expect exactly "AA:BB:CC:DD:EE:FF"
+// Returns true on success. addr_type always set to 0 (public).
+static int parse_target_string(const char* s, size_t len, bd_addr_t out_addr, uint8_t* out_type)
+{
+  if (len != 17) return 0;
+  for (int i = 0; i < 17; i++) {
+    if ((i + 1) % 3 == 0) { // positions 2,5,8,11,14 should be ':'
+      if (s[i] != ':') return 0;
+    } else {
+      char c = s[i];
+      int hex = (c >= '0' && c <= '9') ||
+        (c >= 'A' && c <= 'F');
+      if (!hex) return 0;
+    }
+  }
+  // convert
+  for (int b = 0; b < 6; b++) {
+    char hi = s[b * 3];
+    char lo = s[b * 3 + 1];
+    uint8_t vh = (uint8_t)(hi <= '9' ? hi - '0' : hi - 'A' + 10);
+    uint8_t vl = (uint8_t)(lo <= '9' ? lo - '0' : lo - 'A' + 10);
+    out_addr[b] = (uint8_t)((vh << 4) | vl);
+  }
+  if (out_type) *out_type = 0; // public
+  return 1;
+}
+
+static void save_found_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* adv_data, uint8_t adv_size)
+{
   for (int i = 0; i < seen_devices_count; i++) {
     if (bd_addr_cmp(addr, seen_device_addrs[i]) == 0) {
       return;
@@ -91,13 +143,14 @@ static void save_found_device(bd_addr_t addr, const uint8_t* adv_data, uint8_t a
     case BLUETOOTH_DATA_TYPE_SHORTENED_LOCAL_NAME:
     case BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME:
       memcpy(seen_device_addrs[seen_devices_count], addr, sizeof(bd_addr_t));
+      seen_device_types[seen_devices_count] = addr_type;
       seen_device_names[seen_devices_count] = (char*)malloc(size + 1);
       if (seen_device_names[seen_devices_count]) {
         memcpy(seen_device_names[seen_devices_count], data, size);
         seen_device_names[seen_devices_count][size] = '\0';
       }
       seen_devices_count++;
-      printf("Found device %s\n", seen_device_names[seen_devices_count - 1]);
+      printf("Found device %s (type=%u)\n", seen_device_names[seen_devices_count - 1], addr_type);
       return;
     default:
       break;
@@ -171,8 +224,12 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     const uint8_t* data = gap_event_advertising_report_get_data(packet);
     uint8_t data_len = gap_event_advertising_report_get_data_length(packet);
     bd_addr_t address;
+    uint8_t addr_type = gap_event_advertising_report_get_address_type(packet);
     gap_event_advertising_report_get_address(packet, address);
-    save_found_device(address, data, data_len);
+    save_found_device(address, addr_type, data, data_len);
+    if (target_device.valid && bd_addr_cmp(address, target_device.addr) == 0 && con_handle_target == HCI_CON_HANDLE_INVALID) {
+      attempt_target_connection();
+    }
     break;
   case HCI_EVENT_META_GAP:
     switch (hci_event_gap_meta_get_subevent_code(packet)) {
@@ -184,6 +241,16 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         app_set_state(APP_STATE_IDLE);
       } else if (role == HCI_ROLE_MASTER) {
         printf("Peripheral Device Connected\n");
+        // Connection to target
+        bd_addr_t peer_addr;
+        hci_con_handle_t handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+        gap_subevent_le_connection_complete_get_peer_address(packet, peer_addr);
+        if (target_device.valid &&
+          bd_addr_cmp(peer_addr, target_device.addr) == 0) {
+          con_handle_target = handle;
+          printf("Target connected\n");
+          app_set_state(APP_STATE_TARGET_CONNECTED);
+        }
       }
       break;
     default:
@@ -193,11 +260,17 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
   case HCI_EVENT_DISCONNECTION_COMPLETE:
     switch (hci_event_disconnection_complete_get_status(packet)) {
     case ERROR_CODE_SUCCESS:
-      uint8_t role =
-        hci_connection_for_handle(
-          hci_event_disconnection_complete_get_connection_handle(
-            packet))
-        ->role;
+      hci_con_handle_t dh = hci_event_disconnection_complete_get_connection_handle(packet);
+      if (dh == con_handle_target) {
+        printf("Target disconnected\n");
+        con_handle_target = HCI_CON_HANDLE_INVALID;
+        if (target_device.valid) {
+          gap_start_scan();
+          app_set_state(APP_STATE_ADVERTISING);
+        }
+      }
+
+      uint8_t role = hci_connection_for_handle(hci_event_disconnection_complete_get_connection_handle(packet))->role;
       if (role == HCI_ROLE_SLAVE) {
         printf("Central Device Disconnected\n");
         gap_stop_scan();
@@ -273,28 +346,86 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
   }
 }
 
-static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
+static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t att_handle,
+  uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
 {
+  printf("Read Request\n");
   if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE) {
+    printf("Reading List\n");
     static uint8_t devices_buf[SEEN_DEVICES_CHAR_BUFFER_SIZE];
     uint16_t len = build_seen_devices_listing(devices_buf, sizeof(devices_buf));
     return att_read_callback_handle_blob(devices_buf, len, offset, buffer, buffer_size);
+  } else if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE) {
+    printf("Reading Target\n");
+    static char target_buf[32];
+    uint16_t len = 0;
+    if (target_device.valid) {
+      len = (uint16_t)snprintf(target_buf, sizeof(target_buf),
+        "%02X:%02X:%02X:%02X:%02X:%02X,%u",
+        target_device.addr[0], target_device.addr[1], target_device.addr[2],
+        target_device.addr[3], target_device.addr[4], target_device.addr[5],
+        target_device.addr_type);
+    } else {
+      target_buf[0] = '\0';
+      len = 0;
+    }
+    return att_read_callback_handle_blob((uint8_t*)target_buf, len, offset, buffer, buffer_size);
   }
   return 0;
 };
 
-static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t transaction_mode, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
+static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_handle,
+  uint16_t transaction_mode, uint16_t offset,
+  uint8_t* buffer, uint16_t buffer_size)
 {
+  if (transaction_mode != ATT_TRANSACTION_MODE_NONE || offset != 0) return 0;
+
   if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE) {
-    if (transaction_mode == ATT_TRANSACTION_MODE_NONE && offset == 0) {
-      if (buffer_size == 5 && (memcmp(buffer, "CLEAR", 5) == 0)) {
-        clear_seen_devices();
-      } else {
-        printf("Unknown command (expect CLEAR)\n");
-      }
+    if (buffer_size == 5 && memcmp(buffer, "CLEAR", 5) == 0) {
+      clear_seen_devices();
     } else {
-      printf("Write with offset/transaction not supported (offset=%u mode=%u)\n", offset, transaction_mode);
+      printf("Unknown command (expect CLEAR)\n");
     }
+  } else if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE) {
+    printf("Writing Target\n");
+    if (buffer_size == 5 && memcmp(buffer, "CLEAR", 5) == 0) {
+      target_device.valid = 0;
+      con_handle_target = HCI_CON_HANDLE_INVALID;
+      printf("Target cleared\n");
+      gap_start_scan();
+      app_set_state(APP_STATE_ADVERTISING);
+    } else {
+      char tmp[48];
+      size_t copy = buffer_size < sizeof(tmp) - 1 ? buffer_size : sizeof(tmp) - 1;
+      memcpy(tmp, buffer, copy);
+      tmp[copy] = 0;
+      bd_addr_t parsed;
+      uint8_t addr_type;
+      if (parse_target_string(tmp, copy, parsed, &addr_type)) {
+        memcpy(target_device.addr, parsed, 6);
+        target_device.addr_type = addr_type;
+        target_device.valid = 1;
+        printf("Target set to %s (type=%u)\n", bd_addr_to_str(target_device.addr), target_device.addr_type);
+        // If already seen in list, attempt now; else ensure scanning
+        bool found = false;
+        for (int i = 0; i < seen_devices_count; i++) {
+          if (bd_addr_cmp(seen_device_addrs[i], target_device.addr) == 0) {
+            found = true;
+            break;
+          }
+        }
+        if (found) {
+          attempt_target_connection();
+        } else {
+          gap_start_scan();
+          printf("Target not yet seen; continuing scan\n");
+        }
+      } else {
+        printf("Invalid target format\n");
+      }
+    }
+  } else {
+    printf("Write to unknown handle %04X\n", att_handle);
   }
   return 0;
 }
