@@ -439,15 +439,21 @@ static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t a
 
 // parse "AA:BB:CC:DD:EE:FF,<type>,<name>"
 // returns a target_device_t with valid=1 if parsing was successful
-static target_device_t parse_device_string(const char* s)
+static target_device_t parse_device_string(const char* s, uint16_t s_len)
 {
   target_device_t temp_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
   char temp_device_addr[18];
+  char s_buf[55];
+  if (s_len >= sizeof(s_buf)) {
+    return temp_device;
+  }
+  memcpy(s_buf, s, s_len);
+  s_buf[s_len] = '\0';
 
-  int result = sscanf(s, "%17s,%u,%31s", temp_device_addr, &temp_device.addr_type, temp_device.name);
+  // Read directly into uint8_t using %hhu
+  int result = sscanf(s_buf, "%17[^,],%hhu,%31[^\r\n]", temp_device_addr, &temp_device.addr_type, temp_device.name);
 
-  printf("Number of items matched: %d\n", result);
   if (result == 3) {
     temp_device.valid = sscanf_bd_addr(temp_device_addr, temp_device.addr);
     printf("Address: %s\n", bd_addr_to_str(temp_device.addr));
@@ -473,9 +479,9 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
     if (buffer_size == 5 && memcmp(buffer, "CLEAR", 5) == 0) {
       clear_target_device();
     } else {
-      printf("Setting target device to: %.*s\n", buffer_size, buffer);
+      printf("Trying to set target device: %.*s\n", buffer_size, buffer);
       
-      target_device_t temp_device = parse_device_string((const char*)buffer);
+      target_device_t temp_device = parse_device_string((const char*)buffer, buffer_size);
 
       if (!temp_device.valid) {
         printf("Invalid target format\n");
