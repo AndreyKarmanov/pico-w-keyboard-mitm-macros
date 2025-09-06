@@ -17,7 +17,8 @@ future additions
 
 
 # TODOs
-- [ ] configuration UI for choosing a device to connect to (via index.html)
+- [x] configuration UI for choosing a device to connect to (via index.html)
+- [ ] set up hids client to connect to keybaord's HID service
 - [ ] configuration UI for setting up macros (open a basic index.html and use bluetooth api to adjust)
 - [ ] store macros in NVM
 - [ ] properly mirror keyboard's reports & advertisements

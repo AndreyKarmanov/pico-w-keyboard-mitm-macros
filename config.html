@@ -1,237 +1,297 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8">
-<title>MITM Device Config</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 900px; }
-  h1 { margin-top: 0; }
-  button { margin: 0 .5rem .5rem 0; }
-  #status { margin: .5rem 0 1rem; font-size: .9rem; color: #555; white-space: pre-line; }
-  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-  th, td { border: 1px solid #ccc; padding: .4rem .6rem; font-size: .85rem; }
-  th { background: #f5f5f5; text-align: left; }
-  #devicesEmpty { color: #777; font-style: italic; margin-top: 1rem; }
-  .mac { font-family: monospace; }
-  #autoRefreshCtl { margin-left: 1rem; }
-  #target { margin-top:1rem; padding:.5rem; background:#f0f6ff; border:1px solid #b6d4ff; }
-  .select-btn { font-size:.7rem; }
-</style>
+  <meta charset="UTF-8">
+  <title>MITM Device Config</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 2rem;
+      max-width: 900px;
+    }
+
+    h1 {
+      margin-top: 0;
+    }
+
+    button {
+      margin: 0 .5rem .5rem 0;
+    }
+
+    #status {
+      margin: .5rem 0 1rem;
+      font-size: .9rem;
+      color: #555;
+      white-space: pre-line;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 1rem;
+    }
+
+    th,
+    td {
+      border: 1px solid #ccc;
+      padding: .4rem .6rem;
+      font-size: .85rem;
+    }
+
+    th {
+      background: #f5f5f5;
+      text-align: left;
+    }
+
+    #devicesEmpty {
+      color: #777;
+      font-style: italic;
+      margin-top: 1rem;
+    }
+
+    .mac {
+      font-family: monospace;
+    }
+
+    #autoRefreshCtl {
+      margin-left: 1rem;
+    }
+
+    #target {
+      margin-top: 1rem;
+      padding: .5rem;
+      background: #f0f6ff;
+      border: 1px solid #b6d4ff;
+    }
+
+    .select-btn {
+      font-size: .7rem;
+    }
+  </style>
 </head>
+
 <body>
-<h1>MITM Device Configuration</h1>
-<div>
-  <button id="connectBtn">Connect</button>
-  <button id="refreshBtn" disabled>Refresh</button>
-  <button id="clearBtn" disabled>Clear Seen Devices</button>
-  <label id="autoRefreshCtl">
-    <input type="checkbox" id="autoRefresh"> Auto Refresh
-  </label>
-  <select id="intervalSel" disabled>
-    <option value="2000">2s</option>
-    <option value="5000" selected>5s</option>
-    <option value="10000">10s</option>
-  </select>
-</div>
-<div id="status">Idle</div>
-<div id="target">Target: <span id="targetVal">(none)</span>
-  <button id="clearTargetBtn" disabled>Clear Target</button>
-</div>
-<div id="devicesContainer"></div>
+  <h1>MITM Device Configuration</h1>
+  <div>
+    <button id="connectBtn">Connect</button>
+    <button id="refreshBtn" disabled>Refresh</button>
+    <button id="clearBtn" disabled>Clear Seen Devices</button>
+    <label id="autoRefreshCtl">
+      <input type="checkbox" id="autoRefresh"> Auto Refresh
+    </label>
+    <select id="intervalSel" disabled>
+      <option value="2000">2s</option>
+      <option value="5000" selected>5s</option>
+      <option value="10000">10s</option>
+    </select>
+  </div>
+  <div id="status">Idle</div>
+  <div id="target">Target: <span id="targetVal">(none)</span>
+    <button id="clearTargetBtn" disabled>Clear Target</button>
+  </div>
+  <div id="devicesContainer"></div>
 
-<script>
-(() => {
-  const SERVICE_UUID = '12345678-90ab-cdef-0123-456789abcdef';
-  const LIST_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf0';
-  const TARGET_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf1';
+  <script>
+    (() => {
+      const SERVICE_UUID = '12345678-90ab-cdef-0123-456789abcdef';
+      const LIST_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf0';
+      const TARGET_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf1';
 
-  let device, server, service, listChar, targetChar;
-  let autoTimer = null;
+      let device, server, service, listChar, targetChar;
+      let autoTimer = null;
 
-  const qs = id => document.getElementById(id);
-  const statusEl = qs('status');
-  const devicesContainer = qs('devicesContainer');
-  const targetValEl = document.getElementById('targetVal');
-  const clearTargetBtn = document.getElementById('clearTargetBtn');
+      const qs = id => document.getElementById(id);
+      const statusEl = qs('status');
+      const devicesContainer = qs('devicesContainer');
+      const targetValEl = document.getElementById('targetVal');
+      const clearTargetBtn = document.getElementById('clearTargetBtn');
 
-  function setStatus(msg) {
-    statusEl.textContent = msg;
-    console.log('[STATUS]', msg);
-  }
-
-  function enableControls(connected) {
-    qs('refreshBtn').disabled = !connected;
-    qs('clearBtn').disabled = !connected;
-    qs('intervalSel').disabled = !connected || !qs('autoRefresh').checked;
-    clearTargetBtn.disabled = !connected;
-  }
-
-  async function connect() {
-    try {
-      setStatus('Requesting device...');
-      device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: 'MITM' }],
-        optionalServices: [SERVICE_UUID]
-      });
-      device.addEventListener('gattserverdisconnected', onDisconnected);
-      setStatus('Connecting GATT...');
-      server = await device.gatt.connect();
-      setStatus('Getting service...');
-      service = await server.getPrimaryService(SERVICE_UUID);
-      [listChar, targetChar] = await Promise.all([
-        service.getCharacteristic(LIST_CHAR_UUID),
-        service.getCharacteristic(TARGET_CHAR_UUID)
-      ]);
-      setStatus('Connected.');
-      enableControls(true);
-      await Promise.all([refresh(), refreshTarget()]);
-    } catch (e) {
-      setStatus('Error: ' + e);
-      console.error(e);
-    }
-  }
-
-  function onDisconnected() {
-    setStatus('Disconnected.');
-    enableControls(false);
-    stopAuto();
-  }
-
-  function parseListing(text) {
-    // Each line: MAC,name
-    return text
-      .split(/\r?\n/)
-      .map(l => l.trim())
-      .filter(l => l.length)
-      .map(line => {
-        const idx = line.indexOf(',');
-        if (idx === -1) return { mac: line, name: '' };
-        return { mac: line.slice(0, idx), name: line.slice(idx + 1) };
-      });
-  }
-
-  async function refreshTarget() {
-    if (!targetChar) return;
-    try {
-      const value = await targetChar.readValue();
-      const text = new TextDecoder().decode(value.buffer).trim();
-      if (text) {
-        targetValEl.textContent = text;
-      } else {
-        targetValEl.textContent = '(none)';
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+        console.log('[STATUS]', msg);
       }
-    } catch(e) {
-      console.warn('Target read failed', e);
-    }
-  }
 
-  function renderDevices(list) {
-    if (!list.length) {
-      devicesContainer.innerHTML = '<div id="devicesEmpty">No devices recorded yet.</div>';
-      return;
-    }
-    let html = '<table><thead><tr><th>#</th><th>MAC</th><th>Name</th><th>Select</th></tr></thead><tbody>';
-    list.forEach((d, i) => {
-      // Assume addr type unknown here; will default to public (0)
-      html += `<tr>
+      function enableControls(connected) {
+        qs('refreshBtn').disabled = !connected;
+        qs('clearBtn').disabled = !connected;
+        qs('intervalSel').disabled = !connected || !qs('autoRefresh').checked;
+        clearTargetBtn.disabled = !connected;
+      }
+
+      async function connect() {
+        try {
+          setStatus('Requesting device...');
+          device = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: 'MITM' }],
+            optionalServices: [SERVICE_UUID]
+          });
+          device.addEventListener('gattserverdisconnected', onDisconnected);
+          setStatus('Connecting GATT...');
+          server = await device.gatt.connect();
+          setStatus('Getting service...');
+          service = await server.getPrimaryService(SERVICE_UUID);
+          [listChar, targetChar] = await Promise.all([
+            service.getCharacteristic(LIST_CHAR_UUID),
+            service.getCharacteristic(TARGET_CHAR_UUID)
+          ]);
+          setStatus('Connected.');
+          enableControls(true);
+          await Promise.all([refresh(), refreshTarget()]);
+        } catch (e) {
+          setStatus('Error: ' + e);
+          console.error(e);
+        }
+      }
+
+      function onDisconnected() {
+        setStatus('Disconnected.');
+        enableControls(false);
+        stopAuto();
+      }
+
+      function parseListing(text) {
+        return text
+          .split(/\r?\n/)
+          .map(l => l.trim())
+          .filter(l => l.length)
+          .map(line => {
+            const parts = line.split(',');
+            return { mac: parts[0], type: parts[1], name: parts.slice(2).join(',') };
+          });
+      }
+
+      async function refreshTarget() {
+        if (!targetChar) return;
+        try {
+          const value = await targetChar.readValue();
+            const raw = new TextDecoder().decode(value.buffer).trim();
+            if (raw) {
+              const parts = raw.split(',');
+              if (parts.length >= 3) {
+                const mac = parts[0];
+                const type = parts[1];
+                const name = parts.slice(2).join(',');
+                targetValEl.textContent = `${mac} (type ${type}) ${name}`;
+              } else {
+                targetValEl.textContent = raw;
+              }
+            } else {
+              targetValEl.textContent = '(none)';
+            }
+        } catch (e) {
+          console.warn('Target read failed', e);
+        }
+      }
+
+      function renderDevices(list) {
+        if (!list.length) {
+          devicesContainer.innerHTML = '<div id="devicesEmpty">No devices recorded yet.</div>';
+          return;
+        }
+        let html = '<table><thead><tr><th>#</th><th>MAC</th><th>Type</th><th>Name</th><th>Select</th></tr></thead><tbody>';
+        list.forEach((d, i) => {
+          html += `<tr>
         <td>${i + 1}</td>
         <td class="mac">${d.mac}</td>
+        <td>${d.type}</td>
         <td>${d.name || ''}</td>
-        <td><button class="select-btn" data-mac="${d.mac}">Set Target</button></td>
+        <td><button class="select-btn" data-mac="${d.mac}" data-type="${d.type}" data-name="${d.name || ''}">Set Target</button></td>
       </tr>`;
-    });
-    html += '</tbody></table>';
-    devicesContainer.innerHTML = html;
-    devicesContainer.querySelectorAll('.select-btn').forEach(btn => {
-      btn.addEventListener('click', () => setTarget(btn.dataset.mac));
-    });
-  }
+        });
+        html += '</tbody></table>';
+        devicesContainer.innerHTML = html;
+        devicesContainer.querySelectorAll('.select-btn').forEach(btn => {
+          btn.addEventListener('click', () => setTarget(btn.dataset.mac, btn.dataset.type, btn.dataset.name));
+        });
+      }
 
-  async function setTarget(mac) {
-    if (!targetChar) return;
-    try {
-      setStatus('Setting target...');
-      const enc = new TextEncoder();
-      await targetChar.writeValueWithoutResponse(enc.encode(mac));
-      setTimeout(async () => {
-        await refreshTarget();
-        setStatus('Target set.');
-      }, 200);
-    } catch(e) {
-      setStatus('Set target failed: ' + e);
-    }
-  }
+      async function setTarget(mac, type = '0', name = '') {
+        if (!targetChar) return;
+        try {
+          setStatus('Setting target...');
+          const enc = new TextEncoder();
+          await targetChar.writeValueWithoutResponse(enc.encode(`${mac},${type},${name}`));
+          setTimeout(async () => {
+            await refreshTarget();
+            setStatus('Target set.');
+          }, 200);
+        } catch (e) {
+          setStatus('Set target failed: ' + e);
+        }
+      }
 
-  async function clearTarget() {
-    if (!targetChar) return;
-    try {
-      setStatus('Clearing target...');
-      const enc = new TextEncoder();
-      await targetChar.writeValueWithoutResponse(enc.encode('CLEAR'));
-      setTimeout(async () => {
-        await refreshTarget();
-        setStatus('Target cleared.');
-      }, 200);
-    } catch(e) {
-      setStatus('Clear target failed: ' + e);
-    }
-  }
+      async function clearTarget() {
+        if (!targetChar) return;
+        try {
+          setStatus('Clearing target...');
+          const enc = new TextEncoder();
+          await targetChar.writeValueWithoutResponse(enc.encode('CLEAR'));
+          setTimeout(async () => {
+            await refreshTarget();
+            setStatus('Target cleared.');
+          }, 200);
+        } catch (e) {
+          setStatus('Clear target failed: ' + e);
+        }
+      }
 
-  async function refresh() {
-    if (!listChar) return;
-    try {
-      setStatus('Reading devices...');
-      const value = await listChar.readValue();
-      const text = new TextDecoder().decode(value.buffer);
-      renderDevices(parseListing(text));
-      await refreshTarget();
-      setStatus('Last updated: ' + new Date().toLocaleTimeString());
-    } catch (e) {
-      setStatus('Read failed: ' + e);
-      console.error(e);
-    }
-  }
+      async function refresh() {
+        if (!listChar) return;
+        try {
+          setStatus('Reading devices...');
+          const value = await listChar.readValue();
+          const text = new TextDecoder().decode(value.buffer);
+          renderDevices(parseListing(text));
+          await refreshTarget();
+          setStatus('Last updated: ' + new Date().toLocaleTimeString());
+        } catch (e) {
+          setStatus('Read failed: ' + e);
+          console.error(e);
+        }
+      }
 
-  async function clearDevices() {
-    if (!listChar) return;
-    try {
-      setStatus('Clearing...');
-      const enc = new TextEncoder();
-      await listChar.writeValueWithoutResponse(enc.encode('CLEAR'));
-      // Small delay to allow device to process before re-read
-      setTimeout(refresh, 300);
-    } catch (e) {
-      setStatus('Clear failed: ' + e);
-      console.error(e);
-    }
-  }
+      async function clearDevices() {
+        if (!listChar) return;
+        try {
+          setStatus('Clearing...');
+          const enc = new TextEncoder();
+          await listChar.writeValueWithoutResponse(enc.encode('CLEAR'));
+          // Small delay to allow device to process before re-read
+          setTimeout(refresh, 300);
+        } catch (e) {
+          setStatus('Clear failed: ' + e);
+          console.error(e);
+        }
+      }
 
-  function startAuto() {
-    stopAuto();
-    qs('intervalSel').disabled = false;
-    autoTimer = setInterval(refresh, parseInt(qs('intervalSel').value, 10));
-  }
+      function startAuto() {
+        stopAuto();
+        qs('intervalSel').disabled = false;
+        autoTimer = setInterval(refresh, parseInt(qs('intervalSel').value, 10));
+      }
 
-  function stopAuto() {
-    qs('intervalSel').disabled = true;
-    if (autoTimer) clearInterval(autoTimer);
-    autoTimer = null;
-  }
+      function stopAuto() {
+        qs('intervalSel').disabled = true;
+        if (autoTimer) clearInterval(autoTimer);
+        autoTimer = null;
+      }
 
-  // Event bindings
-  qs('connectBtn').addEventListener('click', connect);
-  qs('refreshBtn').addEventListener('click', refresh);
-  qs('clearBtn').addEventListener('click', clearDevices);
-  qs('autoRefresh').addEventListener('change', e => {
-    if (e.target.checked) startAuto(); else stopAuto();
-  });
-  qs('intervalSel').addEventListener('change', () => {
-    if (qs('autoRefresh').checked) startAuto();
-  });
-  clearTargetBtn.addEventListener('click', clearTarget);
+      // Event bindings
+      qs('connectBtn').addEventListener('click', connect);
+      qs('refreshBtn').addEventListener('click', refresh);
+      qs('clearBtn').addEventListener('click', clearDevices);
+      qs('autoRefresh').addEventListener('change', e => {
+        if (e.target.checked) startAuto(); else stopAuto();
+      });
+      qs('intervalSel').addEventListener('change', () => {
+        if (qs('autoRefresh').checked) startAuto();
+      });
+      clearTargetBtn.addEventListener('click', clearTarget);
 
-  enableControls(false);
-})();
-</script>
+      enableControls(false);
+    })();
+  </script>
 </body>
+
 </html>
