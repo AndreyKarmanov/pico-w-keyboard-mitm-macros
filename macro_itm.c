@@ -206,6 +206,7 @@ static void clear_target_device()
     gap_disconnect(target_device.con_handle);
   }
   // the con_handle should only be removed in disconnection complete event
+  printf("Clearing target device\n");
   target_device.valid = 0;
   target_set_state(TARGET_STATE_SCANNING);
 }
@@ -300,7 +301,6 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
   case BTSTACK_EVENT_STATE:
     switch (btstack_event_state_get_state(packet)) {
     case HCI_STATE_WORKING:
-      printf("BTstack up and running.\n");
       target_set_state(TARGET_STATE_SCANNING);
       host_set_state(HOST_STATE_ADVERTISING);
       break;
@@ -356,12 +356,10 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         gap_subevent_le_connection_complete_get_peer_address(packet, addr);
 
         if (role == HCI_ROLE_SLAVE) {
-          printf("Central Device Connected: %s\n", bd_addr_to_str(addr));
           host_set_state(HOST_STATE_CONNECTED);
         } else if (target_state == TARGET_STATE_CONNECTING && target_device.valid && bd_addr_cmp(addr, target_device.addr) == 0) {
-          printf("Target Device Connected: %s\n", bd_addr_to_str(addr));
           btstack_run_loop_remove_timer(&connection_timer);
-          printf("Initiating Pairing...\n");
+          printf("Initiating Target Pairing\n");
           target_device.con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
           sm_request_pairing(target_device.con_handle);
         } else {
@@ -496,14 +494,10 @@ static target_device_t parse_device_string(const char* s, uint16_t s_len)
   s_buf[s_len] = '\0';
 
   // "AA:BB:CC:DD:EE:FF,<type>,<name>"
-  int result = sscanf(s_buf, "%17[^,],%hhu,%31", temp_addr_s, &temp_device.addr_type, temp_device.name);
+  int result = sscanf(s_buf, "%17[^,],%hhu,%31[^\r\n]", temp_addr_s, &temp_device.addr_type, temp_device.name);
 
   if (result == 3) {
     temp_device.valid = sscanf_bd_addr(temp_addr_s, temp_device.addr);
-    printf("Address: %s\n", bd_addr_to_str(temp_device.addr));
-    printf("Type: %u\n", temp_device.addr_type);
-    printf("Name: %s\n", temp_device.name);
-    printf("Valid: %s\n", temp_device.valid ? "true" : "false");
   }
 
   return temp_device;
@@ -553,8 +547,8 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
 
 int btstack_main(int argc, const char* argv[])
 {
-  (void)argc;
-  (void)argv;
+  UNUSED(argc);
+  UNUSED(argv);
 
   /* Organized in a chronological manner of what is used and in what order */
 

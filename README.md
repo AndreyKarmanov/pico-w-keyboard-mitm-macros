@@ -17,12 +17,12 @@ future additions
 
 
 # TODOs
-- [x] configuration UI for choosing a device to connect to (via index.html)
-- [ ] set up hids client to connect to keybaord's HID service
-- [ ] configuration UI for setting up macros (open a basic index.html and use bluetooth api to adjust)
-- [ ] store macros in NVM
-- [ ] properly mirror keyboard's reports & advertisements
-  - [ ] support for multiple keyboards/layouts
+- [x] Connect to BLE keyboard as a client
+- [x] Scan and select from available keyboards
+- [ ] HOG connection to keyboard
+- [ ] mirror keyboard's reports & advertisements to host
+- [ ] configuration UI for setting up macros
+- [ ] macros stored in NVM
 
 
 ## Architecture
