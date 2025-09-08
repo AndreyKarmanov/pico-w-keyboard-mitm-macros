@@ -19,7 +19,7 @@ future additions
 # TODOs
 - [x] Connect to BLE keyboard as a client
 - [x] Scan and select from available keyboards
-- [ ] HOG connection to keyboard
+- [x] HOG connection to keyboard
 - [ ] mirror keyboard's reports & advertisements to host
 - [ ] configuration UI for setting up macros
 - [ ] macros stored in NVM
