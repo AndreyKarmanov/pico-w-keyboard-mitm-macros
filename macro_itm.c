@@ -23,20 +23,19 @@ typedef enum {
 static app_state_t app_state;
 
 typedef enum {
-  HOST_STATE_NONE = 0,
+  HOST_STATE_IDLE = 0,
   HOST_STATE_ADVERTISING,
   HOST_STATE_CONNECTED,
 } host_state_t;
-static host_state_t host_state = HOST_STATE_NONE;
+static host_state_t host_state = HOST_STATE_IDLE;
 
 typedef enum {
-  TARGET_STATE_NONE = 0,
+  TARGET_STATE_IDLE = 0,
   TARGET_STATE_SCANNING,
   TARGET_STATE_CONNECTING,
   TARGET_STATE_CONNECTED,
-  TARGET_STATE_ERROR,
 } target_state_t;
-static target_state_t target_state = TARGET_STATE_NONE;
+static target_state_t target_state = TARGET_STATE_IDLE;
 
 static const char* app_state_strings[] = {
   "IDLE",
@@ -51,11 +50,10 @@ static const char* host_state_strings[] = {
 };
 
 static const char* target_state_strings[] = {
-  "NONE",
+  "IDLE",
   "SCANNING",
   "CONNECTING",
   "CONNECTED",
-  "ERROR",
 };
 
 // TLV tag for target device ('TRGT')
@@ -127,11 +125,23 @@ static void target_set_state(target_state_t new_state)
   printf("[TARGET STATE] %s -> %s\n", target_state_strings[target_state], target_state_strings[new_state]);
   target_state = new_state;
 
-  // if both are ready, go to ready state
-  if (target_state == TARGET_STATE_CONNECTED && host_state == HOST_STATE_CONNECTED) {
-    app_set_state(APP_STATE_READY);
-  } else {
-    app_set_state(APP_STATE_ACTIVE);
+  switch (target_state) {
+  case TARGET_STATE_IDLE:
+    gap_stop_scan();
+    break;
+  case TARGET_STATE_SCANNING:
+    gap_start_scan();
+    break;
+  case TARGET_STATE_CONNECTING:
+    break;
+  case TARGET_STATE_CONNECTED:
+    gap_stop_scan();
+    if (host_state == HOST_STATE_CONNECTED) {
+      app_set_state(APP_STATE_READY);
+    } else {
+      app_set_state(APP_STATE_ACTIVE);
+    }
+    break;
   }
 }
 
@@ -141,11 +151,20 @@ static void host_set_state(host_state_t new_state)
   printf("[HOST STATE] %s -> %s\n", host_state_strings[host_state], host_state_strings[new_state]);
   host_state = new_state;
 
-  // if both are ready, go to ready state
-  if (target_state == TARGET_STATE_CONNECTED && host_state == HOST_STATE_CONNECTED) {
-    app_set_state(APP_STATE_READY);
-  } else {
-    app_set_state(APP_STATE_ACTIVE);
+  switch (host_state) {
+  case HOST_STATE_IDLE:
+    gap_advertisements_enable(0);
+    break;
+  case HOST_STATE_ADVERTISING:
+    gap_advertisements_enable(1);
+    break;
+  case HOST_STATE_CONNECTED:
+    gap_advertisements_enable(0);
+    if (target_state == TARGET_STATE_CONNECTED)
+      app_set_state(APP_STATE_READY);
+    else
+      app_set_state(APP_STATE_ACTIVE);
+    break;
   }
 }
 
@@ -154,7 +173,7 @@ static void connection_timeout(btstack_timer_source_t* ts)
   UNUSED(ts);
   printf("Connection Timeout\n");
   gap_connect_cancel();
-  target_set_state(TARGET_STATE_NONE);
+  target_set_state(TARGET_STATE_SCANNING);
 }
 
 // Attempt connection to selected target (called after seeing advertisement or setting target)
@@ -186,9 +205,9 @@ static void clear_target_device()
     printf("Disconnecting from target\n");
     gap_disconnect(target_device.con_handle);
   }
-  target_device.con_handle = HCI_CON_HANDLE_INVALID;
+  // the con_handle should only be removed in disconnection complete event
   target_device.valid = 0;
-  target_set_state(TARGET_STATE_NONE);
+  target_set_state(TARGET_STATE_SCANNING);
 }
 
 static void save_found_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* adv_data, uint8_t adv_size)
@@ -282,9 +301,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     switch (btstack_event_state_get_state(packet)) {
     case HCI_STATE_WORKING:
       printf("BTstack up and running.\n");
-      gap_start_scan();
       target_set_state(TARGET_STATE_SCANNING);
-      gap_advertisements_enable(1);
       host_set_state(HOST_STATE_ADVERTISING);
       break;
     default:
@@ -297,12 +314,15 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     bd_addr_t address;
     gap_event_advertising_report_get_address(packet, address);
     uint8_t addr_type = gap_event_advertising_report_get_address_type(packet);
-    
+
     save_found_device(address, addr_type, data, data_len);
-    if (target_device.valid && bd_addr_cmp(address, target_device.addr) == 0) {
+
+    // connect if we have a target and see it
+    if (target_state == TARGET_STATE_SCANNING
+      && target_device.valid
+      && bd_addr_cmp(address, target_device.addr) == 0) {
       attempt_target_connection();
     }
-    
     break;
   case GAP_EVENT_PAIRING_STARTED:
     printf("GAP Pairing started\n");
@@ -337,21 +357,22 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
 
         if (role == HCI_ROLE_SLAVE) {
           printf("Central Device Connected: %s\n", bd_addr_to_str(addr));
-          gap_advertisements_enable(0);
-          app_set_state(APP_STATE_IDLE);
-        } else if (role == HCI_ROLE_MASTER) {
-          printf("Peripheral Device Connected: %s\n", bd_addr_to_str(addr));
+          host_set_state(HOST_STATE_CONNECTED);
+        } else if (target_state == TARGET_STATE_CONNECTING && target_device.valid && bd_addr_cmp(addr, target_device.addr) == 0) {
+          printf("Target Device Connected: %s\n", bd_addr_to_str(addr));
           btstack_run_loop_remove_timer(&connection_timer);
           printf("Initiating Pairing...\n");
           target_device.con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
           sm_request_pairing(target_device.con_handle);
+        } else {
+          printf("Unknown Device Connected: %s\n", bd_addr_to_str(addr));
+          gap_disconnect(gap_subevent_le_connection_complete_get_connection_handle(packet));
         }
         break;
       default:
         printf("Connection failed, status %u\n", gap_subevent_le_connection_complete_get_status(packet));
         break;
       }
-
       break;
     default:
       break;
@@ -360,22 +381,19 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
   case HCI_EVENT_DISCONNECTION_COMPLETE:
     switch (hci_event_disconnection_complete_get_status(packet)) {
     case ERROR_CODE_SUCCESS:
-      hci_con_handle_t dh = hci_event_disconnection_complete_get_connection_handle(packet);
-      if (dh == target_device.con_handle) {
+      hci_con_handle_t con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
+      uint8_t role = hci_connection_for_handle(con_handle)->role;
+      if (con_handle == target_device.con_handle) {
         target_device.con_handle = HCI_CON_HANDLE_INVALID;
-        printf("Target disconnected\n");
+        target_set_state(TARGET_STATE_SCANNING);
         if (target_device.valid) {
           attempt_target_connection();
         }
-      }
-
-      uint8_t role = hci_connection_for_handle(hci_event_disconnection_complete_get_connection_handle(packet))->role;
-      if (role == HCI_ROLE_SLAVE) {
-        printf("Central Device Disconnected\n");
-        gap_advertisements_enable(1);
+        break;
+      } else if (role == HCI_ROLE_SLAVE) {
         host_set_state(HOST_STATE_ADVERTISING);
-      } else if (role == HCI_ROLE_MASTER) {
-        printf("Peripheral Device Disconnected\n");
+      } else {
+        printf("Unknown Device Disconnected\n");
       }
       break;
     default:
@@ -512,6 +530,15 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
       if (!temp_device.valid) {
         printf("Invalid target format\n");
         return 0;
+      }
+
+      if (target_device.valid && bd_addr_cmp(temp_device.addr, target_device.addr) == 0) {
+        printf("Target device unchanged\n");
+        return 0;
+      }
+
+      if (target_device.valid) {
+        clear_target_device();
       }
 
       target_device = temp_device;
