@@ -38,12 +38,24 @@ typedef enum {
 } target_state_t;
 static target_state_t target_state = TARGET_STATE_NONE;
 
-
 static const char* app_state_strings[] = {
   "IDLE",
+  "ACTIVE",
+  "READY",
+};
+
+static const char* host_state_strings[] = {
+  "NONE",
   "ADVERTISING",
-  "CONNECTING_TARGET",
-  "TARGET_CONNECTED",
+  "CONNECTED",
+};
+
+static const char* target_state_strings[] = {
+  "NONE",
+  "SCANNING",
+  "CONNECTING",
+  "CONNECTED",
+  "ERROR",
 };
 
 // TLV tag for target device ('TRGT')
@@ -112,6 +124,7 @@ static void app_set_state(app_state_t new_state)
 static void target_set_state(target_state_t new_state)
 {
   if (new_state == target_state) return;
+  printf("[TARGET STATE] %s -> %s\n", target_state_strings[target_state], target_state_strings[new_state]);
   target_state = new_state;
 
   // if both are ready, go to ready state
@@ -125,6 +138,7 @@ static void target_set_state(target_state_t new_state)
 static void host_set_state(host_state_t new_state)
 {
   if (new_state == host_state) return;
+  printf("[HOST STATE] %s -> %s\n", host_state_strings[host_state], host_state_strings[new_state]);
   host_state = new_state;
 
   // if both are ready, go to ready state
@@ -144,12 +158,17 @@ static void connection_timeout(btstack_timer_source_t* ts)
 }
 
 // Attempt connection to selected target (called after seeing advertisement or setting target)
-static void attempt_target_connection(void)
+static void attempt_target_connection()
 {
-  if (!target_device.valid) return;
-  if (target_state == TARGET_STATE_CONNECTING || target_state == TARGET_STATE_CONNECTED) return;
+  if (!target_device.valid) {
+    printf("No valid target device set\n");
+    return;
+  }
+  if (target_state == TARGET_STATE_CONNECTING || target_state == TARGET_STATE_CONNECTED) {
+    printf("Already connecting or connected to target\n");
+    return;
+  }
   printf("Attempting connection to target %s (type=%u)\n", bd_addr_to_str(target_device.addr), target_device.addr_type);
-  gap_stop_scan();
   target_set_state(TARGET_STATE_CONNECTING);
   btstack_run_loop_set_timer(&connection_timer, 10000); // 10s timeout
   btstack_run_loop_set_timer_handler(&connection_timer, &connection_timeout);
@@ -159,6 +178,14 @@ static void attempt_target_connection(void)
 
 static void clear_target_device()
 {
+  if (target_state == TARGET_STATE_CONNECTING) {
+    printf("Aborting target connection attempt\n");
+    gap_connect_cancel();
+    btstack_run_loop_remove_timer(&connection_timer);
+  } else if (target_state == TARGET_STATE_CONNECTED) {
+    printf("Disconnecting from target\n");
+    gap_disconnect(target_device.con_handle);
+  }
   target_device.con_handle = HCI_CON_HANDLE_INVALID;
   target_device.valid = 0;
   target_set_state(TARGET_STATE_NONE);
@@ -254,7 +281,9 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
   case BTSTACK_EVENT_STATE:
     switch (btstack_event_state_get_state(packet)) {
     case HCI_STATE_WORKING:
+      printf("BTstack up and running.\n");
       gap_start_scan();
+      target_set_state(TARGET_STATE_SCANNING);
       gap_advertisements_enable(1);
       host_set_state(HOST_STATE_ADVERTISING);
       break;
@@ -266,17 +295,19 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     const uint8_t* data = gap_event_advertising_report_get_data(packet);
     uint8_t data_len = gap_event_advertising_report_get_data_length(packet);
     bd_addr_t address;
-    uint8_t addr_type = gap_event_advertising_report_get_address_type(packet);
     gap_event_advertising_report_get_address(packet, address);
+    uint8_t addr_type = gap_event_advertising_report_get_address_type(packet);
+    
     save_found_device(address, addr_type, data, data_len);
     if (target_device.valid && bd_addr_cmp(address, target_device.addr) == 0) {
       attempt_target_connection();
     }
+    
     break;
   case GAP_EVENT_PAIRING_STARTED:
     printf("GAP Pairing started\n");
     break;
-  case GAP_EVENT_PAIRING_COMPLETE:
+  case GAP_EVENT_PAIRING_COMPLETE: // I believe this is for LE with profiles, because this doesn't get triggered for generic pairing
     switch (gap_event_pairing_complete_get_status(packet)) {
     case ERROR_CODE_SUCCESS:
       printf("GAP Pairing complete, success\n");
@@ -334,8 +365,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         target_device.con_handle = HCI_CON_HANDLE_INVALID;
         printf("Target disconnected\n");
         if (target_device.valid) {
-          gap_start_scan();
-          target_set_state(TARGET_STATE_SCANNING);
+          attempt_target_connection();
         }
       }
 
@@ -422,7 +452,7 @@ static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t a
     uint16_t len = build_seen_devices_listing(devices_buf, sizeof(devices_buf));
     return att_read_callback_handle_blob(devices_buf, len, offset, buffer, buffer_size);
   } else if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE) {
-    static char target_buf[54]; // "AA:BB:CC:DD:EE:FF,<type>,<name>"
+    static char target_buf[55];
     uint16_t len = 0;
     if (target_device.valid) {
       len = (uint16_t)snprintf(target_buf, sizeof(target_buf), "%s,%u,%s", bd_addr_to_str(target_device.addr), target_device.addr_type, target_device.name);
@@ -435,15 +465,11 @@ static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t a
   return 0;
 };
 
-
-
-// parse "AA:BB:CC:DD:EE:FF,<type>,<name>"
-// returns a target_device_t with valid=1 if parsing was successful
 static target_device_t parse_device_string(const char* s, uint16_t s_len)
 {
   target_device_t temp_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
-  char temp_device_addr[18];
+  char temp_addr_s[18];
   char s_buf[55];
   if (s_len >= sizeof(s_buf)) {
     return temp_device;
@@ -451,11 +477,11 @@ static target_device_t parse_device_string(const char* s, uint16_t s_len)
   memcpy(s_buf, s, s_len);
   s_buf[s_len] = '\0';
 
-  // Read directly into uint8_t using %hhu
-  int result = sscanf(s_buf, "%17[^,],%hhu,%31[^\r\n]", temp_device_addr, &temp_device.addr_type, temp_device.name);
+  // "AA:BB:CC:DD:EE:FF,<type>,<name>"
+  int result = sscanf(s_buf, "%17[^,],%hhu,%31", temp_addr_s, &temp_device.addr_type, temp_device.name);
 
   if (result == 3) {
-    temp_device.valid = sscanf_bd_addr(temp_device_addr, temp_device.addr);
+    temp_device.valid = sscanf_bd_addr(temp_addr_s, temp_device.addr);
     printf("Address: %s\n", bd_addr_to_str(temp_device.addr));
     printf("Type: %u\n", temp_device.addr_type);
     printf("Name: %s\n", temp_device.name);
@@ -480,7 +506,7 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
       clear_target_device();
     } else {
       printf("Trying to set target device: %.*s\n", buffer_size, buffer);
-      
+
       target_device_t temp_device = parse_device_string((const char*)buffer, buffer_size);
 
       if (!temp_device.valid) {
@@ -522,8 +548,9 @@ int btstack_main(int argc, const char* argv[])
   gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
   gap_advertisements_set_data(config_adv_data_len, (uint8_t*)config_adv_data);
 
-  // setup attributes: access to the services/characteristics/descriptors
+  // setup attributes: provide access to the services/characteristics/descriptors
   att_server_init(profile_data, att_read_callback, att_write_callback);
+  device_information_service_server_init();
 
   // setup security: handles pairing, authentication, encryption
   sm_init();
@@ -532,10 +559,12 @@ int btstack_main(int argc, const char* argv[])
   sm_event_callback_registration.callback = &sm_packet_handler;
   sm_add_event_handler(&sm_event_callback_registration);
 
-  // for connecting to target
+  // Init GATT Client to enable reading profiles?
+  gatt_client_init();
+
+  // Init HID Service Client to access HID over GATT Service on target
   hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
 
-  device_information_service_server_init();
 
   // turn off stdout buffering to help with debugging (disable in prod tho)
   // setvbuf(stdin, NULL, _IONBF, 0);
@@ -544,7 +573,6 @@ int btstack_main(int argc, const char* argv[])
 
   gap_set_scan_params(1, 0x0030, 0x0030, 0);
 
-  // lets go!
   hci_power_control(HCI_POWER_ON);
 
   return 0;
