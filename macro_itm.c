@@ -69,7 +69,7 @@ static const char* target_state_strings[] = {
 
 typedef struct {
   bd_addr_t addr;
-  uint8_t addr_type;
+  bd_addr_type_t addr_type;
   char name[32];
   hci_con_handle_t con_handle;
   uint8_t valid;
@@ -119,6 +119,8 @@ const uint8_t config_adv_data[] = {
   0x78, 0x56, 0x34, 0x12, /* 128-bit UUIDs: 12345678-90AB-CDEF-0123-456789ABCDEF */
 };
 const uint8_t config_adv_data_len = sizeof(config_adv_data);
+
+static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 
 static void app_set_state(app_state_t new_state)
 {
@@ -184,8 +186,7 @@ static void connection_timeout(btstack_timer_source_t* ts)
   target_set_state(TARGET_STATE_SCANNING);
 }
 
-// Attempt connection to selected target (called after seeing advertisement or setting target)
-static void attempt_target_connection()
+static void attempt_gap_connect()
 {
   if (!target_device.valid) {
     printf("No valid target device set\n");
@@ -220,7 +221,7 @@ static void clear_target_device()
   target_set_state(TARGET_STATE_SCANNING);
 }
 
-static void save_found_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* adv_data, uint8_t adv_size)
+static void save_seen_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* adv_data, uint8_t adv_size)
 {
   for (int i = 0; i < seen_devices_count; i++) {
     if (bd_addr_cmp(addr, seen_device_addrs[i]) == 0) {
@@ -256,8 +257,7 @@ static void save_found_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* 
   }
 }
 
-// Helper: clear stored devices
-static void clear_seen_devices(void)
+static void clear_seen_devices()
 {
   for (int i = 0; i < seen_devices_count; i++) {
     free(seen_device_names[i]);
@@ -267,7 +267,6 @@ static void clear_seen_devices(void)
   printf("Seen devices cleared\n");
 }
 
-// Helper: build textual representation into buffer, return length
 static uint16_t build_seen_devices_listing(uint8_t* out, uint16_t max_len)
 {
   uint16_t pos = 0;
@@ -298,7 +297,6 @@ static uint16_t build_seen_devices_listing(uint8_t* out, uint16_t max_len)
   return pos;
 }
 
-
 void print_hid_report(const uint8_t* report, uint16_t len)
 {
   char buffer[1024];  // adjust size depending on max HID report length
@@ -314,136 +312,49 @@ void print_hid_report(const uint8_t* report, uint16_t len)
   printf("%s", buffer);
 }
 
-static void handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size)
+void print_hid_descriptor(const uint8_t* descriptor, uint16_t len)
 {
-  UNUSED(channel);
-  UNUSED(size);
+  char buffer[2048];  // adjust size depending on max HID descriptor length
+  int offset = 0;
 
-  if (packet_type != HCI_EVENT_GATTSERVICE_META)
-    return;
+  offset += snprintf(buffer + offset, sizeof(buffer) - offset, "HID Descriptor: ");
 
-  switch (hci_event_gattservice_meta_get_subevent_code(packet)) {
-  case GATTSERVICE_SUBEVENT_CLIENT_CONNECTED:
-    switch (gattservice_subevent_client_connected_get_status(packet)) {
-    case ERROR_CODE_SUCCESS:
-      printf("HID service client connected, found %d services\n",
-             gattservice_subevent_hid_service_connected_get_num_instances(packet));
-      target_set_state(TARGET_STATE_CONNECTED);
-      break;
-    default:
-      printf("HID service client connection failed, status 0x%02x.\n",
-             gattservice_subevent_hid_service_connected_get_status(packet));
-      break;
-    }
-    break;
-  case GATTSERVICE_SUBEVENT_CLIENT_DISCONNECTED:
-    printf("HID service client disconnected\n");
-    if (target_device.valid && target_connecting_state == HIDS_SERVICE_CONNECTING) {
-      target_set_state(TARGET_STATE_CONNECTING);
-      hids_client_connect(
-        target_device.con_handle,
-        handle_gatt_client_event,
-        HID_PROTOCOL_MODE_REPORT,
-        &hids_cid
-      );
-    } else {
-      target_set_state(TARGET_STATE_SCANNING);
-    }
-    break;
-  case GATTSERVICE_SUBEVENT_HID_REPORT:
-    if (target_state != TARGET_STATE_CONNECTED) {
-      target_set_state(TARGET_STATE_CONNECTED);
-    } 
-    print_hid_report(
-      gattservice_subevent_hid_report_get_report(packet),
-      gattservice_subevent_hid_report_get_report_len(packet)
-    );
-    break;
-  default:
-    break;
+  for (uint16_t i = 0; i < len && offset < (int)sizeof(buffer); i++) {
+    offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%02X ", descriptor[i]);
   }
+
+  snprintf(buffer + offset, sizeof(buffer) - offset, "\n");
+  printf("%s", buffer);
 }
 
-static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size)
+void attempt_hids_connect()
 {
-  UNUSED(channel);
-  UNUSED(size);
-
-  if (packet_type != HCI_EVENT_PACKET)
+  if (target_state != TARGET_STATE_CONNECTING) {
+    printf("Not connected to target, cannot connect to HID service\n");
     return;
+  }
+  printf("Attempting HID service connection\n");
+  target_connecting_state = HIDS_SERVICE_CONNECTING;
+  uint8_t result = hids_client_connect(
+    target_device.con_handle,
+    hci_packet_handler,
+    HID_PROTOCOL_MODE_REPORT,
+    &hids_cid
+  );
 
-  switch (hci_event_packet_get_type(packet)) {
-  case SM_EVENT_JUST_WORKS_REQUEST:
-    printf("Just works requested\n");
-    sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+  switch (result) {
+  case ERROR_CODE_SUCCESS:
+    printf("HID service client connected\n");
+    target_set_state(TARGET_STATE_CONNECTED);
     break;
-  case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
-    printf("Confirming numeric comparison: %" PRIu32 "\n",
-           sm_event_numeric_comparison_request_get_passkey(packet));
-    sm_numeric_comparison_confirm(
-      sm_event_numeric_comparison_request_get_handle(packet));
+  case ERROR_CODE_COMMAND_DISALLOWED:
+    printf("HID service client already connected\n");
+    target_set_state(TARGET_STATE_CONNECTED);
     break;
-  case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
-    printf("Display Passkey: %" PRIu32 "\n",
-           sm_event_passkey_display_number_get_passkey(packet));
-    break;
-  case SM_EVENT_PAIRING_COMPLETE:
-    switch (sm_event_pairing_complete_get_status(packet)) {
-    case ERROR_CODE_SUCCESS:
-      printf("Pairing success\n");
-      target_connecting_state = HIDS_SERVICE_CONNECTING;
-      if (sm_event_pairing_complete_get_handle(packet) == target_device.con_handle) {
-        printf("HIDS Client connect\n");
-        hids_client_connect(
-          target_device.con_handle,
-          handle_gatt_client_event,
-          HID_PROTOCOL_MODE_REPORT,
-          &hids_cid
-        );
-      } else {
-        printf("Unknown device paired\n");
-      }
-      break;
-    default:
-      printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_reason(packet));
-      target_set_state(TARGET_STATE_SCANNING);
-      break;
-    }
-    break;
-  case SM_EVENT_REENCRYPTION_STARTED:
-    printf("Re-encryption started\n");
-    hci_con_handle_t con_handle = sm_event_reencryption_started_get_handle(packet);
-    if (con_handle == target_device.con_handle) {
-      target_connecting_state = SM_CONNECTING;
-      target_set_state(TARGET_STATE_CONNECTING);
-    }
-    break;
-  case SM_EVENT_REENCRYPTION_COMPLETE:
-    int is_target_event = sm_event_reencryption_complete_get_handle(packet) == target_device.con_handle;
-    switch (sm_event_reencryption_complete_get_status(packet)) {
-    case ERROR_CODE_PIN_OR_KEY_MISSING:
-      printf("Re-encryption failed, PIN or Key missing - retry pairing\n");
-      sm_request_pairing(sm_event_reencryption_complete_get_handle(packet));
-      break;
-    case ERROR_CODE_SUCCESS:
-      printf("Re-encryption complete, success\n");
-      if (sm_event_pairing_complete_get_handle(packet) == target_device.con_handle) {
-        printf("Re-connecting hids client\n");
-        target_connecting_state = HIDS_SERVICE_CONNECTING;
-        hids_client_connect(
-          target_device.con_handle,
-          handle_gatt_client_event,
-          HID_PROTOCOL_MODE_REPORT,
-          &hids_cid
-        );
-      }
-      break;
-    default:
-      break;
-    }
   default:
     break;
   }
+
 }
 
 static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size)
@@ -472,34 +383,39 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     gap_event_advertising_report_get_address(packet, address);
     uint8_t addr_type = gap_event_advertising_report_get_address_type(packet);
 
-    save_found_device(address, addr_type, data, data_len);
+    save_seen_device(address, addr_type, data, data_len);
 
     // connect if we have a target and see it
     if (target_state == TARGET_STATE_SCANNING
         && target_device.valid
         && bd_addr_cmp(address, target_device.addr) == 0) {
-      attempt_target_connection();
+      attempt_gap_connect();
     }
     break;
-  case GAP_EVENT_PAIRING_STARTED:
-    printf("GAP Pairing started\n");
-    break;
-  case GAP_EVENT_PAIRING_COMPLETE: // I believe this is for LE with profiles, because this doesn't get triggered for generic pairing
-    switch (gap_event_pairing_complete_get_status(packet)) {
-    case ERROR_CODE_SUCCESS:
-      printf("GAP Pairing complete, success\n");
+  case HCI_EVENT_GATTSERVICE_META:
+    switch (hci_event_gattservice_meta_get_subevent_code(packet)) {
+    case GATTSERVICE_SUBEVENT_HID_SERVICE_CONNECTED:
+      print_hid_descriptor(
+        hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0),
+        hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0)
+      );
       break;
-    case ERROR_CODE_CONNECTION_TIMEOUT:
-      printf("GAP Pairing failed, timeout\n");
+    case GATTSERVICE_SUBEVENT_CLIENT_DISCONNECTED:
+      printf("HID service client disconnected\n");
+      if (target_device.valid && target_connecting_state == HIDS_SERVICE_CONNECTING) {
+        target_set_state(TARGET_STATE_CONNECTING);
+        attempt_hids_connect();
+      } else {
+        target_set_state(TARGET_STATE_SCANNING);
+      }
       break;
-    case ERROR_CODE_REMOTE_USER_TERMINATED_CONNECTION:
-      printf("GAP Pairing failed, disconnected\n");
-      break;
-    case ERROR_CODE_AUTHENTICATION_FAILURE:
-      printf("GAP Pairing failed, Authentication failure\n");
+    case GATTSERVICE_SUBEVENT_HID_REPORT:
+      print_hid_report(
+        gattservice_subevent_hid_report_get_report(packet),
+        gattservice_subevent_hid_report_get_report_len(packet)
+      );
       break;
     default:
-      printf("GAP Pairing failed, status = %u\n", gap_event_pairing_complete_get_status(packet));
       break;
     }
     break;
@@ -558,26 +474,73 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
   }
 }
 
-static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
+static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size)
 {
-  if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE) {
-    // Now returns lines: MAC,TYPE,NAME
-    static uint8_t devices_buf[SEEN_DEVICES_CHAR_BUFFER_SIZE];
-    uint16_t len = build_seen_devices_listing(devices_buf, sizeof(devices_buf));
-    return att_read_callback_handle_blob(devices_buf, len, offset, buffer, buffer_size);
-  } else if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE) {
-    static char target_buf[55];
-    uint16_t len = 0;
-    if (target_device.valid) {
-      len = (uint16_t)snprintf(target_buf, sizeof(target_buf), "%s,%u,%s", bd_addr_to_str(target_device.addr), target_device.addr_type, target_device.name);
-    } else {
-      target_buf[0] = '\0';
-      len = 0;
+  UNUSED(channel);
+  UNUSED(size);
+
+  if (packet_type != HCI_EVENT_PACKET)
+    return;
+
+  switch (hci_event_packet_get_type(packet)) {
+  case SM_EVENT_JUST_WORKS_REQUEST:
+    printf("Just works requested\n");
+    sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+    break;
+  case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
+    printf("Confirming numeric comparison: %" PRIu32 "\n",
+           sm_event_numeric_comparison_request_get_passkey(packet));
+    sm_numeric_comparison_confirm(
+      sm_event_numeric_comparison_request_get_handle(packet));
+    break;
+  case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
+    printf("Display Passkey: %" PRIu32 "\n",
+           sm_event_passkey_display_number_get_passkey(packet));
+    break;
+  case SM_EVENT_PAIRING_COMPLETE:
+    switch (sm_event_pairing_complete_get_status(packet)) {
+    case ERROR_CODE_SUCCESS:
+      printf("Pairing success\n");
+      if (sm_event_pairing_complete_get_handle(packet) == target_device.con_handle) {
+        attempt_hids_connect();
+      } else {
+        printf("Unknown device paired\n");
+      }
+      break;
+    default:
+      printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_reason(packet));
+      target_set_state(TARGET_STATE_SCANNING);
+      break;
     }
-    return att_read_callback_handle_blob((uint8_t*)target_buf, len, offset, buffer, buffer_size);
+    break;
+  case SM_EVENT_REENCRYPTION_STARTED:
+    printf("Re-encryption started\n");
+    hci_con_handle_t con_handle = sm_event_reencryption_started_get_handle(packet);
+    if (con_handle == target_device.con_handle) {
+      target_connecting_state = SM_CONNECTING;
+      target_set_state(TARGET_STATE_CONNECTING);
+    }
+    break;
+  case SM_EVENT_REENCRYPTION_COMPLETE:
+    int is_target_event = sm_event_reencryption_complete_get_handle(packet) == target_device.con_handle;
+    switch (sm_event_reencryption_complete_get_status(packet)) {
+    case ERROR_CODE_PIN_OR_KEY_MISSING:
+      printf("Re-encryption failed, PIN or Key missing - retry pairing\n");
+      sm_request_pairing(sm_event_reencryption_complete_get_handle(packet));
+      break;
+    case ERROR_CODE_SUCCESS:
+      printf("Re-encryption complete, success\n");
+      if (sm_event_pairing_complete_get_handle(packet) == target_device.con_handle) {
+        attempt_hids_connect();
+      }
+      break;
+    default:
+      break;
+    }
+  default:
+    break;
   }
-  return 0;
-};
+}
 
 static target_device_t parse_device_string(const char* s, uint16_t s_len)
 {
@@ -600,6 +563,27 @@ static target_device_t parse_device_string(const char* s, uint16_t s_len)
 
   return temp_device;
 }
+
+static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
+{
+  if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE) {
+    // Now returns lines: MAC,TYPE,NAME
+    static uint8_t devices_buf[SEEN_DEVICES_CHAR_BUFFER_SIZE];
+    uint16_t len = build_seen_devices_listing(devices_buf, sizeof(devices_buf));
+    return att_read_callback_handle_blob(devices_buf, len, offset, buffer, buffer_size);
+  } else if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE) {
+    static char target_buf[55];
+    uint16_t len = 0;
+    if (target_device.valid) {
+      len = (uint16_t)snprintf(target_buf, sizeof(target_buf), "%s,%u,%s", bd_addr_to_str(target_device.addr), target_device.addr_type, target_device.name);
+    } else {
+      target_buf[0] = '\0';
+      len = 0;
+    }
+    return att_read_callback_handle_blob((uint8_t*)target_buf, len, offset, buffer, buffer_size);
+  }
+  return 0;
+};
 
 static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t transaction_mode, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
 {

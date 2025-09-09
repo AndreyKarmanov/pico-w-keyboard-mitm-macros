@@ -15,6 +15,10 @@ future additions
 - improved security in pairing (code request)
 - support for mimicing the captured keyboard's BT advertisements
 
+# Setup
+- For some reason in BTStack HCI_EVENT_GATTSERVICE_META is used instead of HCI_EVENT_META when dispatching some events. 
+- Therefore in hids_client.h in the btstack repo, I updated two instances of HCI_EVENT_GATTSERVICE_META to HCI_EVENT_META for client reporting
+- Remember that you need to clean and rebuild after making changes to the btstack library
 
 # TODOs
 - [x] Connect to BLE keyboard as a client
