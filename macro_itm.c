@@ -713,13 +713,11 @@ int btstack_main(int argc, const char* argv[])
   // Init HID Service Client to access HID over GATT Service on target
   hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
 
-
   // turn off stdout buffering to help with debugging (disable in prod tho)
   // setvbuf(stdin, NULL, _IONBF, 0);
 
   btstack_tlv_get_instance(&tlv_impl, &tlv_context);
 
-  // Optional: load persisted target on boot for smoother UX
   {
     target_device_t restored = tlv_load_target_device();
     if (restored.valid) {

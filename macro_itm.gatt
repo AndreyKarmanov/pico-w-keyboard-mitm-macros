@@ -5,7 +5,7 @@ CHARACTERISTIC, GAP_DEVICE_NAME, READ, "MITM"
 #import <device_information_service.gatt>
 
 // add HID Service
-// #import <hids.gatt>
+#import <hids.gatt>
 
 PRIMARY_SERVICE, GATT_SERVICE
 CHARACTERISTIC, GATT_DATABASE_HASH, READ,
