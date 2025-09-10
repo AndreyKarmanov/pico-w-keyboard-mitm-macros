@@ -16,6 +16,8 @@
 #include "hardware/watchdog.h"
 
 #include "ble/gatt-service/hids_device.h"
+// Optional but common for HID keyboards, helps some hosts
+#include "ble/gatt-service/battery_service_server.h"
 
 typedef enum {
   APP_STATE_IDLE = 0,
@@ -95,6 +97,7 @@ static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
 static uint16_t hid_report_len = 0;
 static bool hid_report_pending = false;
+static bool host_reports_enabled = false;
 
 static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
@@ -115,6 +118,7 @@ static int seen_devices_count = 0;
 #define SEEN_DEVICES_CHAR_BUFFER_SIZE 1024
 
 static btstack_timer_source_t connection_timer;
+static btstack_timer_source_t host_subscribe_timer;
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
@@ -502,12 +506,23 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
     case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
       host_device.con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
       host_device.connected = 1;
+      host_reports_enabled = hids_subevent_input_report_enable_get_enable(packet) != 0;
+      btstack_run_loop_remove_timer(&host_subscribe_timer);
       printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_input_report_enable_get_enable(packet));
+      if (host_reports_enabled) {
+        // optional: nudge stack to allow first send
+        hids_device_request_can_send_now_event(host_device.con_handle);
+      }
       break;
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
       host_device.con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
       host_device.connected = 1;
+      host_reports_enabled = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
+      btstack_run_loop_remove_timer(&host_subscribe_timer);
       printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
+      if (host_reports_enabled) {
+        hids_device_request_can_send_now_event(host_device.con_handle);
+      }
       break;
     case HIDS_SUBEVENT_PROTOCOL_MODE:
       host_protocol_mode = hids_subevent_protocol_mode_get_protocol_mode(packet);
@@ -626,6 +641,11 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
           host_device.con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
           gap_subevent_le_connection_complete_get_peer_address(packet, host_device.addr);
           host_device.connected = 1;
+          host_reports_enabled = false;
+          // start subscribe watchdog (e.g., 5s)
+          host_subscribe_timer.process = &host_subscribe_timeout;
+          btstack_run_loop_set_timer(&host_subscribe_timer, 5000);
+          btstack_run_loop_add_timer(&host_subscribe_timer);
           host_set_state(HOST_STATE_CONNECTED);
         } else if (target_state == TARGET_STATE_CONNECTING && target_device.valid && bd_addr_cmp(addr, target_device.addr) == 0) {
           btstack_run_loop_remove_timer(&connection_timer);
@@ -661,6 +681,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         host_device.connected = 0;
         host_device.con_handle = HCI_CON_HANDLE_INVALID;
         memset(host_device.addr, 0, sizeof(host_device.addr));
+        host_reports_enabled = false;
+        btstack_run_loop_remove_timer(&host_subscribe_timer);
         host_set_state(HOST_STATE_ADVERTISING);
       } else {
         printf("Unknown Device Disconnected\n");
@@ -952,4 +974,13 @@ int main(int argc, const char* argv[])
 
   cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
   btstack_run_loop_execute();
+}
+
+static void host_subscribe_timeout(btstack_timer_source_t* ts)
+{
+  UNUSED(ts);
+  if (host_device.connected && host_device.con_handle != HCI_CON_HANDLE_INVALID && !host_reports_enabled) {
+    printf("Host did not subscribe within timeout, disconnecting to retry...\n");
+    disconnect_host();
+  }
 }
