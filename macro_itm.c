@@ -81,15 +81,14 @@ static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
 
 #define MAX_SEEN_DEVICES 32
-// struct {
-//   bd_addr_t addr;
-//   uint8_t addr_type;
-//   char name[32];
-// } seen_devices[MAX_SEEN_DEVICES];
 
-bd_addr_t seen_device_addrs[MAX_SEEN_DEVICES];
-static uint8_t seen_device_types[MAX_SEEN_DEVICES];
-static char* seen_device_names[MAX_SEEN_DEVICES];
+typedef struct {
+  bd_addr_t addr;
+  uint8_t addr_type;
+  char name[32];
+} seen_device_t;
+
+static seen_device_t seen_devices[MAX_SEEN_DEVICES];
 static int seen_devices_count = 0;
 
 #define SEEN_DEVICES_CHAR_BUFFER_SIZE 1024
@@ -198,7 +197,7 @@ static void attempt_gap_connect()
   }
   printf("Attempting connection to target %s (type=%u)\n", bd_addr_to_str(target_device.addr), target_device.addr_type);
   target_set_state(TARGET_STATE_CONNECTING);
-  target_connecting_state == GAP_CONNECTING;
+  target_connecting_state = GAP_CONNECTING;
   btstack_run_loop_set_timer(&connection_timer, 10000); // 10s timeout
   btstack_run_loop_set_timer_handler(&connection_timer, &connection_timeout);
   btstack_run_loop_add_timer(&connection_timer);
@@ -223,16 +222,17 @@ static void clear_target_device()
 
 static void save_seen_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* adv_data, uint8_t adv_size)
 {
+  // Skip if already seen
   for (int i = 0; i < seen_devices_count; i++) {
-    if (bd_addr_cmp(addr, seen_device_addrs[i]) == 0) {
+    if (bd_addr_cmp(addr, seen_devices[i].addr) == 0) {
       return;
     }
   }
 
-  ad_context_t context;
   if (seen_devices_count >= MAX_SEEN_DEVICES)
     return;
 
+  ad_context_t context;
   for (ad_iterator_init(&context, adv_size, adv_data); ad_iterator_has_more(&context); ad_iterator_next(&context)) {
     uint8_t data_type = ad_iterator_get_data_type(&context);
     uint8_t size = ad_iterator_get_data_len(&context);
@@ -240,17 +240,17 @@ static void save_seen_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* a
 
     switch (data_type) {
     case BLUETOOTH_DATA_TYPE_SHORTENED_LOCAL_NAME:
-    case BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME:
-      memcpy(seen_device_addrs[seen_devices_count], addr, sizeof(bd_addr_t));
-      seen_device_types[seen_devices_count] = addr_type;
-      seen_device_names[seen_devices_count] = (char*)malloc(size + 1);
-      if (seen_device_names[seen_devices_count]) {
-        memcpy(seen_device_names[seen_devices_count], data, size);
-        seen_device_names[seen_devices_count][size] = '\0';
-      }
+    case BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME: {
+      memcpy(seen_devices[seen_devices_count].addr, addr, sizeof(bd_addr_t));
+      seen_devices[seen_devices_count].addr_type = addr_type;
+      uint8_t copy_len = size < (sizeof(seen_devices[0].name) - 1) ? size : (uint8_t)(sizeof(seen_devices[0].name) - 1);
+      memcpy(seen_devices[seen_devices_count].name, data, copy_len);
+      seen_devices[seen_devices_count].name[copy_len] = '\0';
+
       seen_devices_count++;
-      printf("Found device %s (%s, type=%u)\n", seen_device_names[seen_devices_count - 1], bd_addr_to_str(seen_device_addrs[seen_devices_count - 1]), addr_type);
+      printf("Found device %s (%s, type=%u)\n", seen_devices[seen_devices_count - 1].name, bd_addr_to_str(seen_devices[seen_devices_count - 1].addr), addr_type);
       return;
+    }
     default:
       break;
     }
@@ -259,10 +259,8 @@ static void save_seen_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* a
 
 static void clear_seen_devices()
 {
-  for (int i = 0; i < seen_devices_count; i++) {
-    free(seen_device_names[i]);
-    seen_device_names[i] = NULL;
-  }
+  // Optionally zero out entries for cleanliness
+  memset(seen_devices, 0, sizeof(seen_devices));
   seen_devices_count = 0;
   printf("Seen devices cleared\n");
 }
@@ -271,14 +269,14 @@ static uint16_t build_seen_devices_listing(uint8_t* out, uint16_t max_len)
 {
   uint16_t pos = 0;
   for (int i = 0; i < seen_devices_count; i++) {
-    char* name = seen_device_names[i] ? seen_device_names[i] : "";
+    const char* name = seen_devices[i].name;
     int needed = snprintf(
       (char*)out + pos,
       (pos < max_len) ? (max_len - pos) : 0,
       "%02X:%02X:%02X:%02X:%02X:%02X,%u,%s\n",
-      seen_device_addrs[i][0], seen_device_addrs[i][1], seen_device_addrs[i][2],
-      seen_device_addrs[i][3], seen_device_addrs[i][4], seen_device_addrs[i][5],
-      seen_device_types[i],
+      seen_devices[i].addr[0], seen_devices[i].addr[1], seen_devices[i].addr[2],
+      seen_devices[i].addr[3], seen_devices[i].addr[4], seen_devices[i].addr[5],
+      seen_devices[i].addr_type,
       name
     );
     if (needed < 0) break;
