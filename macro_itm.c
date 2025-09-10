@@ -107,7 +107,7 @@ static target_device_t parse_device_string(const char* s, uint16_t s_len)
   target_device_t temp_device = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
   char temp_addr_s[18];
-  char s_buf[64];
+  char s_buf[65]; // max 64 chars + null terminator
   if (s_len >= sizeof(s_buf)) {
     return temp_device;
   }
