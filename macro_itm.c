@@ -107,7 +107,7 @@ static target_device_t parse_device_string(const char* s, uint16_t s_len)
   target_device_t temp_device = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
   char temp_addr_s[18];
-  char s_buf[55];
+  char s_buf[64];
   if (s_len >= sizeof(s_buf)) {
     return temp_device;
   }
@@ -124,53 +124,44 @@ static target_device_t parse_device_string(const char* s, uint16_t s_len)
   return temp_device;
 }
 
-static void tlv_delete_target(void)
+static void tlv_delete_target()
 {
   if (!tlv_impl) return;
   tlv_impl->delete_tag(tlv_context, TLV_TAG_TARGET_DEVICE);
 }
 
 // Persist as a single ASCII line: "AA:BB:CC:DD:EE:FF,<type>,<name>"
-static target_device_t tlv_load_target_device(void)
+static target_device_t tlv_load_target_device()
 {
-  target_device_t dev = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
-  if (!tlv_impl) return dev;
-  uint8_t buf[64]; // enough for "MAC,TYPE,NAME" within our 55-char parse limit
-  int len = tlv_impl->get_tag(tlv_context, TLV_TAG_TARGET_DEVICE, buf, sizeof(buf));
-  if (len <= 0) return dev;
-  // clamp to parse limit
-  if (len > 54) len = 54;
-  dev = parse_device_string((const char*)buf, (uint16_t)len);
-  return dev;
+  if (!tlv_impl) return (target_device_t) { { 0 }, 0, "", HCI_CON_HANDLE_INVALID, 0 };
+  uint8_t s_buf[64];
+  int len = tlv_impl->get_tag(tlv_context, TLV_TAG_TARGET_DEVICE, s_buf, sizeof(s_buf));
+  return parse_device_string((const char*)s_buf, (uint16_t)len);
 }
 
 static void tlv_store_target_device(const target_device_t* dev)
 {
   if (!tlv_impl || !dev || !dev->valid) return;
-  char s[64];
-  int n = snprintf(s, sizeof(s), "%s,%u,%s", bd_addr_to_str(dev->addr), (unsigned)dev->addr_type, dev->name);
+  char s_buf[64];
+  int n = snprintf(s_buf, sizeof(s_buf), "%s,%u,%s", bd_addr_to_str(dev->addr), (unsigned)dev->addr_type, dev->name);
   if (n < 0) return;
   size_t len = (size_t)n;
-  if (len > sizeof(s)) len = sizeof(s);
-  tlv_impl->store_tag(tlv_context, TLV_TAG_TARGET_DEVICE, (const uint8_t*)s, (uint32_t)len);
+  if (len > sizeof(s_buf)) len = sizeof(s_buf);
+  tlv_impl->store_tag(tlv_context, TLV_TAG_TARGET_DEVICE, (const uint8_t*)s_buf, (uint32_t)len);
 }
 
-static void save_target_if_needed(void)
+static void save_target_if_needed()
 {
   if (!target_device.valid) return;
   target_device_t persisted = tlv_load_target_device();
-  if (persisted.valid) {
-    if ((bd_addr_cmp(persisted.addr, target_device.addr) == 0) && (persisted.addr_type == target_device.addr_type)) {
-      if (strncmp(persisted.name, target_device.name, sizeof(persisted.name)) != 0) {
-        printf("Updating persisted target (name changed)\n");
-        tlv_store_target_device(&target_device);
-      }
-      return; // same target
-    }
-    printf("Persisted target differs, replacing\n");
-  } else {
-    printf("No persisted target, storing current\n");
+  if (persisted.valid
+      && (bd_addr_cmp(persisted.addr, target_device.addr) == 0)
+      && (persisted.addr_type == target_device.addr_type)
+      && (strncmp(persisted.name, target_device.name, sizeof(persisted.name)) == 0)) {
+    printf("Persisted target matches, not updating\n");
+    return;
   }
+  printf("Persisted target differs, replacing\n");
   tlv_store_target_device(&target_device);
 }
 
