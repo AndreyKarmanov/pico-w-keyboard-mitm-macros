@@ -13,7 +13,9 @@
 #include "pico/cyw43_arch.h"
 #include "pico/stdio.h"
 #include "pico/time.h"
+#include "hardware/watchdog.h"
 
+#include "ble/gatt-service/hids_device.h"
 
 typedef enum {
   APP_STATE_IDLE = 0,
@@ -66,6 +68,8 @@ static const char* target_state_strings[] = {
 
 // TLV tag for target device ('TRGT')
 #define TLV_TAG_TARGET_DEVICE 0x54524754u
+// TLV tag for HID descriptor ('HIDD')
+#define TLV_TAG_HID_DESCRIPTOR 0x48494444u
 
 typedef struct {
   bd_addr_t addr;
@@ -77,8 +81,18 @@ typedef struct {
 
 static target_device_t target_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
+static hci_con_handle_t host_con_handle = HCI_CON_HANDLE_INVALID;
+static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
+
+#define HID_REPORT_BUFFER_SIZE 16
+static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
+static uint16_t hid_report_len = 0;
+static bool hid_report_pending = false;
+
 static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
+static uint16_t loaded_hid_descriptor_len = 0;
+
 
 #define MAX_SEEN_DEVICES 32
 
@@ -148,6 +162,24 @@ static void tlv_store_target_device(const target_device_t* dev)
   size_t len = (size_t)n;
   if (len > sizeof(s_buf)) len = sizeof(s_buf);
   tlv_impl->store_tag(tlv_context, TLV_TAG_TARGET_DEVICE, (const uint8_t*)s_buf, (uint32_t)len);
+}
+
+static uint16_t tlv_load_hid_descriptor(uint8_t* buffer, uint16_t buffer_size)
+{
+  if (!tlv_impl) return 0;
+  int len = tlv_impl->get_tag(tlv_context, TLV_TAG_HID_DESCRIPTOR, buffer, buffer_size);
+  if (len > 0) {
+    printf("Loaded HID descriptor from TLV (len=%u)\n", len);
+    return (uint16_t)len;
+  }
+  return 0;
+}
+
+static void tlv_store_hid_descriptor(const uint8_t* descriptor, uint16_t len)
+{
+  if (!tlv_impl || descriptor == NULL || len == 0) return;
+  tlv_impl->store_tag(tlv_context, TLV_TAG_HID_DESCRIPTOR, descriptor, len);
+  printf("Stored HID descriptor in TLV (len=%u)\n", len);
 }
 
 static void save_target_if_needed()
@@ -283,6 +315,7 @@ static void clear_target_device()
   // the con_handle should only be removed in disconnection complete event
   printf("Clearing target device\n");
   tlv_delete_target();
+  loaded_hid_descriptor_len = 0;
   target_device.valid = 0;
   target_set_state(TARGET_STATE_SCANNING);
 }
@@ -422,6 +455,48 @@ void attempt_hids_connect()
 
 }
 
+static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size)
+{
+  UNUSED(channel);
+  UNUSED(size);
+
+  if (packet_type != HCI_EVENT_PACKET) return;
+
+  switch (hci_event_packet_get_type(packet)) {
+  case HCI_EVENT_HIDS_META:
+    switch (hci_event_hids_meta_get_subevent_code(packet)) {
+    case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
+      host_con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
+      printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_con_handle, hids_subevent_input_report_enable_get_enable(packet));
+      break;
+    case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
+      host_con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
+      printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_con_handle, hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
+      break;
+    case HIDS_SUBEVENT_PROTOCOL_MODE:
+      host_protocol_mode = hids_subevent_protocol_mode_get_protocol_mode(packet);
+      printf("Host protocol mode set to %s\n", host_protocol_mode ? "Report" : "Boot");
+      break;
+    case HIDS_SUBEVENT_CAN_SEND_NOW:
+      if (hid_report_pending && host_con_handle != HCI_CON_HANDLE_INVALID) {
+        printf("Sending HID report to host\n");
+        if (host_protocol_mode == 0) { // Boot Protocol
+          hids_device_send_boot_keyboard_input_report(host_con_handle, hid_report_buffer, hid_report_len);
+        } else { // Report Protocol
+          hids_device_send_input_report(host_con_handle, hid_report_buffer, hid_report_len);
+        }
+        hid_report_pending = false;
+      }
+      break;
+    default:
+      break;
+    }
+    break;
+  default:
+    break;
+  }
+}
+
 static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size)
 {
   UNUSED(channel);
@@ -460,10 +535,15 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
   case HCI_EVENT_GATTSERVICE_META:
     switch (hci_event_gattservice_meta_get_subevent_code(packet)) {
     case GATTSERVICE_SUBEVENT_HID_SERVICE_CONNECTED:
-      print_hid_descriptor(
-        hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0),
-        hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0)
-      );
+      if (loaded_hid_descriptor_len == 0) {
+        const uint8_t* desc = hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0);
+        uint16_t desc_len = hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0);
+        print_hid_descriptor(desc, desc_len);
+        // persist descriptor for later host mirroring setup
+        tlv_store_hid_descriptor(desc, desc_len);
+        printf("Rebooting in 100ms to apply HID descriptor\n");
+        watchdog_reboot(0, 0, 1000);
+      }
       break;
     case GATTSERVICE_SUBEVENT_CLIENT_DISCONNECTED:
       printf("HID service client disconnected\n");
@@ -475,11 +555,24 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
       }
       break;
     case GATTSERVICE_SUBEVENT_HID_REPORT:
-      print_hid_report(
-        gattservice_subevent_hid_report_get_report(packet),
-        gattservice_subevent_hid_report_get_report_len(packet)
-      );
-      break;
+    {
+      const uint8_t* report = gattservice_subevent_hid_report_get_report(packet);
+      uint16_t report_len = gattservice_subevent_hid_report_get_report_len(packet);
+      print_hid_report(report, report_len);
+
+      if (host_con_handle != HCI_CON_HANDLE_INVALID) {
+        printf("HID report too large for buffer\n");
+        if (report_len <= HID_REPORT_BUFFER_SIZE) {
+          memcpy(hid_report_buffer, report, report_len);
+          hid_report_len = report_len;
+          hid_report_pending = true;
+          hids_device_request_can_send_now_event(host_con_handle);
+        } else {
+          printf("HID report too large for buffer\n");
+        }
+      }
+    }
+    break;
     default:
       break;
     }
@@ -677,6 +770,7 @@ int btstack_main(int argc, const char* argv[])
   UNUSED(argv);
 
   /* Organized in a chronological manner of what is used and in what order */
+  btstack_tlv_get_instance(&tlv_impl, &tlv_context);
 
   // Register for HCI events, main communication channel between btstack and
   // application
@@ -699,6 +793,9 @@ int btstack_main(int argc, const char* argv[])
   att_server_init(profile_data, att_read_callback, att_write_callback);
   device_information_service_server_init();
 
+
+
+
   // setup security: handles pairing, authentication, encryption
   sm_init();
   sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
@@ -712,11 +809,22 @@ int btstack_main(int argc, const char* argv[])
 
   // Init HID Service Client to access HID over GATT Service on target
   hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
+  
+  // setup HID Device service if descriptor is available
+  uint8_t hid_descriptor[500];
+  uint16_t hid_descriptor_len = tlv_load_hid_descriptor(hid_descriptor, sizeof(hid_descriptor));
+  loaded_hid_descriptor_len = hid_descriptor_len;
+  printf("HID descriptor length from TLV: %u\n", hid_descriptor_len);
+  if (hid_descriptor_len > 0) {
+    printf("HID descriptor loaded from TLV, initializing HID Device Service\n");
+    hids_device_init(0, hid_descriptor, hid_descriptor_len);
+  }
+  hids_device_register_packet_handler(&hids_host_packet_handler);
+
 
   // turn off stdout buffering to help with debugging (disable in prod tho)
   // setvbuf(stdin, NULL, _IONBF, 0);
 
-  btstack_tlv_get_instance(&tlv_impl, &tlv_context);
 
   {
     target_device_t restored = tlv_load_target_device();
