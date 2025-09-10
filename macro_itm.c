@@ -81,7 +81,14 @@ typedef struct {
 
 static target_device_t target_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
-static hci_con_handle_t host_con_handle = HCI_CON_HANDLE_INVALID;
+// Track host (our Peripheral link to PC/Phone)
+typedef struct {
+  hci_con_handle_t con_handle;
+  bd_addr_t addr;      // best-effort, filled on connect
+  uint8_t connected;   // boolean flag
+} host_device_t;
+
+static host_device_t host_device = { HCI_CON_HANDLE_INVALID, {0}, 0 };
 static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 
 #define HID_REPORT_BUFFER_SIZE 16
@@ -203,9 +210,16 @@ const uint8_t config_adv_data[] = {
   0x02, BLUETOOTH_DATA_TYPE_FLAGS,
   0x06, // LE General Discoverable Mode
 
-  // Name
-  0x05, BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME, 'M', 'I', 'T', 'M', // "MITM"
-
+  // 16-bit Service UUIDs
+  0x03,
+  BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
+  ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE & 0xff,
+  ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE >> 8,
+  // Appearance HID - Keyboard (Category 15, Sub-Category 1)
+  0x03,
+  BLUETOOTH_DATA_TYPE_APPEARANCE,
+  0xC1,
+  0x03,
   // Complete List of 128-bit Service UUIDs (complete means advertisement
   // contains all UUIDs available)
   0x11,
@@ -214,6 +228,12 @@ const uint8_t config_adv_data[] = {
   0x78, 0x56, 0x34, 0x12, /* 128-bit UUIDs: 12345678-90AB-CDEF-0123-456789ABCDEF */
 };
 const uint8_t config_adv_data_len = sizeof(config_adv_data);
+
+const uint8_t scan_response_data[] = {
+  // Name
+  0x05, BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME, 'M', 'I', 'T', 'M', // "MITM"
+};
+const uint8_t scan_response_data_len = sizeof(scan_response_data);
 
 static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 
@@ -261,9 +281,15 @@ static void host_set_state(host_state_t new_state)
   switch (host_state) {
   case HOST_STATE_IDLE:
     gap_advertisements_enable(0);
+    host_device.connected = 0;
+    host_device.con_handle = HCI_CON_HANDLE_INVALID;
+    memset(host_device.addr, 0, sizeof(host_device.addr));
     break;
   case HOST_STATE_ADVERTISING:
     gap_advertisements_enable(1);
+    host_device.connected = 0;
+    host_device.con_handle = HCI_CON_HANDLE_INVALID;
+    memset(host_device.addr, 0, sizeof(host_device.addr));
     break;
   case HOST_STATE_CONNECTED:
     gap_advertisements_enable(0);
@@ -318,6 +344,14 @@ static void clear_target_device()
   loaded_hid_descriptor_len = 0;
   target_device.valid = 0;
   target_set_state(TARGET_STATE_SCANNING);
+}
+
+static void disconnect_host()
+{
+  if (host_device.connected && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+    printf("Disconnecting host %s\n", bd_addr_to_str(host_device.addr));
+    gap_disconnect(host_device.con_handle);
+  }
 }
 
 static void save_seen_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* adv_data, uint8_t adv_size)
@@ -466,24 +500,26 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
   case HCI_EVENT_HIDS_META:
     switch (hci_event_hids_meta_get_subevent_code(packet)) {
     case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
-      host_con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
-      printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_con_handle, hids_subevent_input_report_enable_get_enable(packet));
+      host_device.con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
+      host_device.connected = 1;
+      printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_input_report_enable_get_enable(packet));
       break;
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
-      host_con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
-      printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_con_handle, hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
+      host_device.con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
+      host_device.connected = 1;
+      printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
       break;
     case HIDS_SUBEVENT_PROTOCOL_MODE:
       host_protocol_mode = hids_subevent_protocol_mode_get_protocol_mode(packet);
       printf("Host protocol mode set to %s\n", host_protocol_mode ? "Report" : "Boot");
       break;
     case HIDS_SUBEVENT_CAN_SEND_NOW:
-      if (hid_report_pending && host_con_handle != HCI_CON_HANDLE_INVALID) {
+      if (hid_report_pending && host_device.connected && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
         printf("Sending HID report to host\n");
         if (host_protocol_mode == 0) { // Boot Protocol
-          hids_device_send_boot_keyboard_input_report(host_con_handle, hid_report_buffer, hid_report_len);
+          hids_device_send_boot_keyboard_input_report(host_device.con_handle, hid_report_buffer, hid_report_len);
         } else { // Report Protocol
-          hids_device_send_input_report(host_con_handle, hid_report_buffer, hid_report_len);
+          hids_device_send_input_report(host_device.con_handle, hid_report_buffer, hid_report_len);
         }
         hid_report_pending = false;
       }
@@ -542,7 +578,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         // persist descriptor for later host mirroring setup
         tlv_store_hid_descriptor(desc, desc_len);
         printf("Rebooting in 100ms to apply HID descriptor\n");
-        watchdog_reboot(0, 0, 1000);
+        watchdog_reboot(0, 0, 100);
       }
       break;
     case GATTSERVICE_SUBEVENT_CLIENT_DISCONNECTED:
@@ -560,13 +596,12 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
       uint16_t report_len = gattservice_subevent_hid_report_get_report_len(packet);
       print_hid_report(report, report_len);
 
-      if (host_con_handle != HCI_CON_HANDLE_INVALID) {
-        printf("HID report too large for buffer\n");
+      if (host_device.con_handle != HCI_CON_HANDLE_INVALID) {
         if (report_len <= HID_REPORT_BUFFER_SIZE) {
           memcpy(hid_report_buffer, report, report_len);
           hid_report_len = report_len;
           hid_report_pending = true;
-          hids_device_request_can_send_now_event(host_con_handle);
+          hids_device_request_can_send_now_event(host_device.con_handle);
         } else {
           printf("HID report too large for buffer\n");
         }
@@ -587,6 +622,10 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         gap_subevent_le_connection_complete_get_peer_address(packet, addr);
 
         if (role == HCI_ROLE_SLAVE) {
+          // Host connected to our Peripheral role
+          host_device.con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+          gap_subevent_le_connection_complete_get_peer_address(packet, host_device.addr);
+          host_device.connected = 1;
           host_set_state(HOST_STATE_CONNECTED);
         } else if (target_state == TARGET_STATE_CONNECTING && target_device.valid && bd_addr_cmp(addr, target_device.addr) == 0) {
           btstack_run_loop_remove_timer(&connection_timer);
@@ -612,12 +651,16 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     switch (hci_event_disconnection_complete_get_status(packet)) {
     case ERROR_CODE_SUCCESS:
       hci_con_handle_t con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
-      uint8_t role = hci_connection_for_handle(con_handle)->role;
+      // Prefer explicit handle comparison over role lookup
       if (con_handle == target_device.con_handle) {
         target_device.con_handle = HCI_CON_HANDLE_INVALID;
         target_set_state(TARGET_STATE_SCANNING);
         break;
-      } else if (role == HCI_ROLE_SLAVE) {
+      } else if (con_handle == host_device.con_handle) {
+        // Host disconnected
+        host_device.connected = 0;
+        host_device.con_handle = HCI_CON_HANDLE_INVALID;
+        memset(host_device.addr, 0, sizeof(host_device.addr));
         host_set_state(HOST_STATE_ADVERTISING);
       } else {
         printf("Unknown Device Disconnected\n");
@@ -666,7 +709,7 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
       }
       break;
     default:
-      printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_reason(packet));
+      printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_status(packet));
       target_set_state(TARGET_STATE_SCANNING);
       break;
     }
@@ -764,6 +807,59 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
   return 0;
 }
 
+// from USB HID Specification 1.1, Appendix B.1
+const uint8_t hid_descriptor_keyboard_boot_mode[] = {
+
+    0x05, 0x01, // Usage Page (Generic Desktop)
+    0x09, 0x06, // Usage (Keyboard)
+    0xa1, 0x01, // Collection (Application)
+
+    0x85, 0x01, // Report ID 1
+
+    // Modifier byte
+
+    0x75, 0x01, //   Report Size (1)
+    0x95, 0x08, //   Report Count (8)
+    0x05, 0x07, //   Usage Page (Key codes)
+    0x19, 0xe0, //   Usage Minimum (Keyboard LeftControl)
+    0x29, 0xe7, //   Usage Maxium (Keyboard Right GUI)
+    0x15, 0x00, //   Logical Minimum (0)
+    0x25, 0x01, //   Logical Maximum (1)
+    0x81, 0x02, //   Input (Data, Variable, Absolute)
+
+    // Reserved byte
+
+    0x75, 0x01, //   Report Size (1)
+    0x95, 0x08, //   Report Count (8)
+    0x81, 0x03, //   Input (Constant, Variable, Absolute)
+
+    // LED report + padding
+
+    0x95, 0x05, //   Report Count (5)
+    0x75, 0x01, //   Report Size (1)
+    0x05, 0x08, //   Usage Page (LEDs)
+    0x19, 0x01, //   Usage Minimum (Num Lock)
+    0x29, 0x05, //   Usage Maxium (Kana)
+    0x91, 0x02, //   Output (Data, Variable, Absolute)
+
+    0x95, 0x01, //   Report Count (1)
+    0x75, 0x03, //   Report Size (3)
+    0x91, 0x03, //   Output (Constant, Variable, Absolute)
+
+    // Keycodes
+
+    0x95, 0x06, //   Report Count (6)
+    0x75, 0x08, //   Report Size (8)
+    0x15, 0x00, //   Logical Minimum (0)
+    0x25, 0xff, //   Logical Maximum (1)
+    0x05, 0x07, //   Usage Page (Key codes)
+    0x19, 0x00, //   Usage Minimum (Reserved (no event indicated))
+    0x29, 0xff, //   Usage Maxium (Reserved)
+    0x81, 0x00, //   Input (Data, Array)
+
+    0xc0, // End collection
+};
+
 int btstack_main(int argc, const char* argv[])
 {
   UNUSED(argc);
@@ -788,12 +884,11 @@ int btstack_main(int argc, const char* argv[])
   memset(null_addr, 0, 6);
   gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
   gap_advertisements_set_data(config_adv_data_len, (uint8_t*)config_adv_data);
+  gap_scan_response_set_data(scan_response_data_len, (uint8_t*)scan_response_data);
 
   // setup attributes: provide access to the services/characteristics/descriptors
   att_server_init(profile_data, att_read_callback, att_write_callback);
   device_information_service_server_init();
-
-
 
 
   // setup security: handles pairing, authentication, encryption
@@ -809,7 +904,7 @@ int btstack_main(int argc, const char* argv[])
 
   // Init HID Service Client to access HID over GATT Service on target
   hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
-  
+
   // setup HID Device service if descriptor is available
   uint8_t hid_descriptor[500];
   uint16_t hid_descriptor_len = tlv_load_hid_descriptor(hid_descriptor, sizeof(hid_descriptor));
@@ -818,6 +913,9 @@ int btstack_main(int argc, const char* argv[])
   if (hid_descriptor_len > 0) {
     printf("HID descriptor loaded from TLV, initializing HID Device Service\n");
     hids_device_init(0, hid_descriptor, hid_descriptor_len);
+  } else {
+    printf("No HID descriptor in TLV, using default boot keyboard descriptor\n");
+    hids_device_init(0, hid_descriptor_keyboard_boot_mode, sizeof(hid_descriptor_keyboard_boot_mode));
   }
   hids_device_register_packet_handler(&hids_host_packet_handler);
 
