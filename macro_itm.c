@@ -101,6 +101,79 @@ static btstack_packet_callback_registration_t sm_event_callback_registration;
 static const btstack_tlv_t* tlv_impl;
 static void* tlv_context;
 
+// Parser used by TLV helpers and ATT writes
+static target_device_t parse_device_string(const char* s, uint16_t s_len)
+{
+  target_device_t temp_device = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
+
+  char temp_addr_s[18];
+  char s_buf[55];
+  if (s_len >= sizeof(s_buf)) {
+    return temp_device;
+  }
+  memcpy(s_buf, s, s_len);
+  s_buf[s_len] = '\0';
+
+  // "AA:BB:CC:DD:EE:FF,<type>,<name>"
+  int result = sscanf(s_buf, "%17[^,],%hhu,%31[^\r\n]", temp_addr_s, &temp_device.addr_type, temp_device.name);
+
+  if (result == 3) {
+    temp_device.valid = sscanf_bd_addr(temp_addr_s, temp_device.addr);
+  }
+
+  return temp_device;
+}
+
+static void tlv_delete_target(void)
+{
+  if (!tlv_impl) return;
+  tlv_impl->delete_tag(tlv_context, TLV_TAG_TARGET_DEVICE);
+}
+
+// Persist as a single ASCII line: "AA:BB:CC:DD:EE:FF,<type>,<name>"
+static target_device_t tlv_load_target_device(void)
+{
+  target_device_t dev = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
+  if (!tlv_impl) return dev;
+  uint8_t buf[64]; // enough for "MAC,TYPE,NAME" within our 55-char parse limit
+  int len = tlv_impl->get_tag(tlv_context, TLV_TAG_TARGET_DEVICE, buf, sizeof(buf));
+  if (len <= 0) return dev;
+  // clamp to parse limit
+  if (len > 54) len = 54;
+  dev = parse_device_string((const char*)buf, (uint16_t)len);
+  return dev;
+}
+
+static void tlv_store_target_device(const target_device_t* dev)
+{
+  if (!tlv_impl || !dev || !dev->valid) return;
+  char s[64];
+  int n = snprintf(s, sizeof(s), "%s,%u,%s", bd_addr_to_str(dev->addr), (unsigned)dev->addr_type, dev->name);
+  if (n < 0) return;
+  size_t len = (size_t)n;
+  if (len > sizeof(s)) len = sizeof(s);
+  tlv_impl->store_tag(tlv_context, TLV_TAG_TARGET_DEVICE, (const uint8_t*)s, (uint32_t)len);
+}
+
+static void save_target_if_needed(void)
+{
+  if (!target_device.valid) return;
+  target_device_t persisted = tlv_load_target_device();
+  if (persisted.valid) {
+    if ((bd_addr_cmp(persisted.addr, target_device.addr) == 0) && (persisted.addr_type == target_device.addr_type)) {
+      if (strncmp(persisted.name, target_device.name, sizeof(persisted.name)) != 0) {
+        printf("Updating persisted target (name changed)\n");
+        tlv_store_target_device(&target_device);
+      }
+      return; // same target
+    }
+    printf("Persisted target differs, replacing\n");
+  } else {
+    printf("No persisted target, storing current\n");
+  }
+  tlv_store_target_device(&target_device);
+}
+
 // Config Advertisement Data
 const uint8_t config_adv_data[] = {
   // Flags general discoverable, Classic not supported (LE only)
@@ -150,6 +223,8 @@ static void target_set_state(target_state_t new_state)
     } else {
       app_set_state(APP_STATE_ACTIVE);
     }
+    // Persist target info when we complete target connection flow
+    save_target_if_needed();
     break;
   }
 }
@@ -216,6 +291,7 @@ static void clear_target_device()
   }
   // the con_handle should only be removed in disconnection complete event
   printf("Clearing target device\n");
+  tlv_delete_target();
   target_device.valid = 0;
   target_set_state(TARGET_STATE_SCANNING);
 }
@@ -528,7 +604,7 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
       break;
     case ERROR_CODE_SUCCESS:
       printf("Re-encryption complete, success\n");
-      if (sm_event_pairing_complete_get_handle(packet) == target_device.con_handle) {
+      if (is_target_event) {
         attempt_hids_connect();
       }
       break;
@@ -540,27 +616,6 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
   }
 }
 
-static target_device_t parse_device_string(const char* s, uint16_t s_len)
-{
-  target_device_t temp_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
-
-  char temp_addr_s[18];
-  char s_buf[55];
-  if (s_len >= sizeof(s_buf)) {
-    return temp_device;
-  }
-  memcpy(s_buf, s, s_len);
-  s_buf[s_len] = '\0';
-
-  // "AA:BB:CC:DD:EE:FF,<type>,<name>"
-  int result = sscanf(s_buf, "%17[^,],%hhu,%31[^\r\n]", temp_addr_s, &temp_device.addr_type, temp_device.name);
-
-  if (result == 3) {
-    temp_device.valid = sscanf_bd_addr(temp_addr_s, temp_device.addr);
-  }
-
-  return temp_device;
-}
 
 static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
 {
@@ -616,6 +671,7 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
       }
 
       target_device = temp_device;
+      tlv_store_target_device(&target_device);
       printf("Target set to %s (type=%u)\n", bd_addr_to_str(temp_device.addr), temp_device.addr_type);
     }
   } else {
@@ -671,6 +727,15 @@ int btstack_main(int argc, const char* argv[])
   // setvbuf(stdin, NULL, _IONBF, 0);
 
   btstack_tlv_get_instance(&tlv_impl, &tlv_context);
+
+  // Optional: load persisted target on boot for smoother UX
+  {
+    target_device_t restored = tlv_load_target_device();
+    if (restored.valid) {
+      target_device = restored;
+      printf("Restored target from TLV: %s (type=%u, name=\"%s\")\n", bd_addr_to_str(target_device.addr), target_device.addr_type, target_device.name);
+    }
+  }
 
   gap_set_scan_params(1, 0x0030, 0x0030, 0);
 
