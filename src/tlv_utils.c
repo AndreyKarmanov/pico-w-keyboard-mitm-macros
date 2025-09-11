@@ -50,10 +50,10 @@ target_device_t tlv_load_target_device(void) {
     return tlv_parse_device_string((const char*)s_buf, (uint16_t)len);
 }
 
-void tlv_store_target_device(const target_device_t* dev) {
-    if (!tlv_impl || !dev || !dev->valid) return;
+void tlv_store_target_device(const target_device_t* device) {
+    if (!tlv_impl || !device || !device->valid) return;
     char s_buf[64];
-    int n = snprintf(s_buf, sizeof(s_buf), "%s,%u,%s", bd_addr_to_str(dev->addr), (unsigned)dev->addr_type, dev->name);
+    int n = snprintf(s_buf, sizeof(s_buf), "%s,%u,%s", bd_addr_to_str(device->addr), (unsigned)device->addr_type, device->name);
     if (n < 0) return;
     size_t len = (size_t)n;
     if (len > sizeof(s_buf)) len = sizeof(s_buf);
