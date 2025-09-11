@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "btstack.h"
 #include "btstack_config.h"
@@ -40,14 +41,7 @@ typedef enum {
   TARGET_STATE_CONNECTED,
 } target_state_t;
 
-typedef enum {
-  GAP_CONNECTING = 0,
-  SM_CONNECTING,
-  HIDS_SERVICE_CONNECTING
-} connecting_state_t;
-
 static target_state_t target_state = TARGET_STATE_IDLE;
-static connecting_state_t target_connecting_state = GAP_CONNECTING;
 
 static const char* app_state_strings[] = {
   "IDLE",
@@ -78,26 +72,26 @@ typedef struct {
   bd_addr_type_t addr_type;
   char name[32];
   hci_con_handle_t con_handle;
-  uint8_t valid;
+  bool valid;
 } target_device_t;
 
 static target_device_t target_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
 // Track host (our Peripheral link to PC/Phone)
 typedef struct {
+  bd_addr_type_t addr_type; // best-effort, filled on connect
+  bd_addr_t addr;           // best-effort, filled on connect
   hci_con_handle_t con_handle;
-  bd_addr_t addr;      // best-effort, filled on connect
-  uint8_t connected;   // boolean flag
+  bool subscribed_to_reports;
 } host_device_t;
 
-static host_device_t host_device = { HCI_CON_HANDLE_INVALID, {0}, 0 };
+static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, false };
 static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 
 #define HID_REPORT_BUFFER_SIZE 16
 static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
 static uint16_t hid_report_len = 0;
 static bool hid_report_pending = false;
-static bool host_reports_enabled = false;
 
 static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
@@ -117,8 +111,7 @@ static int seen_devices_count = 0;
 
 #define SEEN_DEVICES_CHAR_BUFFER_SIZE 1024
 
-static btstack_timer_source_t connection_timer;
-static btstack_timer_source_t host_subscribe_timer;
+static btstack_timer_source_t target_connection_timer;
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
@@ -285,13 +278,11 @@ static void host_set_state(host_state_t new_state)
   switch (host_state) {
   case HOST_STATE_IDLE:
     gap_advertisements_enable(0);
-    host_device.connected = 0;
     host_device.con_handle = HCI_CON_HANDLE_INVALID;
     memset(host_device.addr, 0, sizeof(host_device.addr));
     break;
   case HOST_STATE_ADVERTISING:
     gap_advertisements_enable(1);
-    host_device.connected = 0;
     host_device.con_handle = HCI_CON_HANDLE_INVALID;
     memset(host_device.addr, 0, sizeof(host_device.addr));
     break;
@@ -325,10 +316,9 @@ static void attempt_gap_connect()
   }
   printf("Attempting connection to target %s (type=%u)\n", bd_addr_to_str(target_device.addr), target_device.addr_type);
   target_set_state(TARGET_STATE_CONNECTING);
-  target_connecting_state = GAP_CONNECTING;
-  btstack_run_loop_set_timer(&connection_timer, 10000); // 10s timeout
-  btstack_run_loop_set_timer_handler(&connection_timer, &connection_timeout);
-  btstack_run_loop_add_timer(&connection_timer);
+  btstack_run_loop_set_timer(&target_connection_timer, 10000); // 10s timeout
+  btstack_run_loop_set_timer_handler(&target_connection_timer, &connection_timeout);
+  btstack_run_loop_add_timer(&target_connection_timer);
   gap_connect(target_device.addr, target_device.addr_type);
 }
 
@@ -337,7 +327,7 @@ static void clear_target_device()
   if (target_state == TARGET_STATE_CONNECTING) {
     printf("Aborting target connection attempt\n");
     gap_connect_cancel();
-    btstack_run_loop_remove_timer(&connection_timer);
+    btstack_run_loop_remove_timer(&target_connection_timer);
   } else if (target_state == TARGET_STATE_CONNECTED) {
     printf("Disconnecting from target\n");
     gap_disconnect(target_device.con_handle);
@@ -352,7 +342,7 @@ static void clear_target_device()
 
 static void disconnect_host()
 {
-  if (host_device.connected && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+  if (host_device.con_handle != HCI_CON_HANDLE_INVALID) {
     printf("Disconnecting host %s\n", bd_addr_to_str(host_device.addr));
     gap_disconnect(host_device.con_handle);
   }
@@ -470,7 +460,6 @@ void attempt_hids_connect()
     return;
   }
   printf("Attempting HID service connection\n");
-  target_connecting_state = HIDS_SERVICE_CONNECTING;
   uint8_t result = hids_client_connect(
     target_device.con_handle,
     hci_packet_handler,
@@ -505,22 +494,17 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
     switch (hci_event_hids_meta_get_subevent_code(packet)) {
     case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
       host_device.con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
-      host_device.connected = 1;
-      host_reports_enabled = hids_subevent_input_report_enable_get_enable(packet) != 0;
-      btstack_run_loop_remove_timer(&host_subscribe_timer);
+      host_device.subscribed_to_reports = hids_subevent_input_report_enable_get_enable(packet) != 0;
       printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_input_report_enable_get_enable(packet));
-      if (host_reports_enabled) {
-        // optional: nudge stack to allow first send
+      if (host_device.subscribed_to_reports) {
         hids_device_request_can_send_now_event(host_device.con_handle);
       }
       break;
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
       host_device.con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
-      host_device.connected = 1;
-      host_reports_enabled = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
-      btstack_run_loop_remove_timer(&host_subscribe_timer);
+      host_device.subscribed_to_reports = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
       printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
-      if (host_reports_enabled) {
+      if (host_device.subscribed_to_reports) {
         hids_device_request_can_send_now_event(host_device.con_handle);
       }
       break;
@@ -529,11 +513,11 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
       printf("Host protocol mode set to %s\n", host_protocol_mode ? "Report" : "Boot");
       break;
     case HIDS_SUBEVENT_CAN_SEND_NOW:
-      if (hid_report_pending && host_device.connected && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+      if (hid_report_pending && host_device.subscribed_to_reports && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
         printf("Sending HID report to host\n");
-        if (host_protocol_mode == 0) { // Boot Protocol
+        if (host_protocol_mode == 0) {
           hids_device_send_boot_keyboard_input_report(host_device.con_handle, hid_report_buffer, hid_report_len);
-        } else { // Report Protocol
+        } else {
           hids_device_send_input_report(host_device.con_handle, hid_report_buffer, hid_report_len);
         }
         hid_report_pending = false;
@@ -556,6 +540,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
   if (packet_type != HCI_EVENT_PACKET)
     return;
 
+  uint8_t status;
+  hci_con_handle_t con_handle;
   switch (hci_event_packet_get_type(packet)) {
   case BTSTACK_EVENT_STATE:
     switch (btstack_event_state_get_state(packet)) {
@@ -579,7 +565,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     // connect if we have a target and see it
     if (target_state == TARGET_STATE_SCANNING
         && target_device.valid
-        && bd_addr_cmp(address, target_device.addr) == 0) {
+        && bd_addr_cmp(address, target_device.addr) == 0
+        && addr_type == target_device.addr_type) {
       attempt_gap_connect();
     }
     break;
@@ -598,7 +585,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
       break;
     case GATTSERVICE_SUBEVENT_CLIENT_DISCONNECTED:
       printf("HID service client disconnected\n");
-      if (target_device.valid && target_connecting_state == HIDS_SERVICE_CONNECTING) {
+      if (target_device.valid) {
         target_set_state(TARGET_STATE_CONNECTING);
         attempt_hids_connect();
       } else {
@@ -611,7 +598,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
       uint16_t report_len = gattservice_subevent_hid_report_get_report_len(packet);
       print_hid_report(report, report_len);
 
-      if (host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+      if (host_device.subscribed_to_reports && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
         if (report_len <= HID_REPORT_BUFFER_SIZE) {
           memcpy(hid_report_buffer, report, report_len);
           hid_report_len = report_len;
@@ -628,68 +615,49 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     }
     break;
   case HCI_EVENT_META_GAP:
-    switch (hci_event_gap_meta_get_subevent_code(packet)) {
-    case GAP_SUBEVENT_LE_CONNECTION_COMPLETE:
-      switch (gap_subevent_le_connection_complete_get_status(packet)) {
-      case ERROR_CODE_SUCCESS:
-        uint8_t role = gap_subevent_le_connection_complete_get_role(packet);
-        bd_addr_t addr;
-        gap_subevent_le_connection_complete_get_peer_address(packet, addr);
+    if (hci_event_gap_meta_get_subevent_code(packet) != GAP_SUBEVENT_LE_CONNECTION_COMPLETE)
+      break;
 
-        if (role == HCI_ROLE_SLAVE) {
-          // Host connected to our Peripheral role
-          host_device.con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
-          gap_subevent_le_connection_complete_get_peer_address(packet, host_device.addr);
-          host_device.connected = 1;
-          host_reports_enabled = false;
-          // start subscribe watchdog (e.g., 5s)
-          host_subscribe_timer.process = &host_subscribe_timeout;
-          btstack_run_loop_set_timer(&host_subscribe_timer, 5000);
-          btstack_run_loop_add_timer(&host_subscribe_timer);
-          host_set_state(HOST_STATE_CONNECTED);
-        } else if (target_state == TARGET_STATE_CONNECTING && target_device.valid && bd_addr_cmp(addr, target_device.addr) == 0) {
-          btstack_run_loop_remove_timer(&connection_timer);
-          printf("Initiating Target Pairing\n");
-          target_connecting_state = SM_CONNECTING;
-          target_device.con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
-          sm_request_pairing(target_device.con_handle);
-        } else {
-          printf("Unknown Device Connected: %s\n", bd_addr_to_str(addr));
-          gap_disconnect(gap_subevent_le_connection_complete_get_connection_handle(packet));
-        }
-        break;
-      default:
-        printf("Connection failed, status %u\n", gap_subevent_le_connection_complete_get_status(packet));
-        break;
-      }
+    bd_addr_t addr;
+    gap_subevent_le_connection_complete_get_peer_address(packet, addr);
+    uint8_t status = gap_subevent_le_connection_complete_get_status(packet);
+
+    if (status != ERROR_CODE_SUCCESS) {
+      printf("Connection failed %s, status %u\n", bd_addr_to_str(addr), status);
       break;
-    default:
-      break;
+    }
+
+    con_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
+    if (target_state == TARGET_STATE_CONNECTING && target_device.valid && bd_addr_cmp(addr, target_device.addr) == 0) {
+      btstack_run_loop_remove_timer(&target_connection_timer);
+      target_device.con_handle = con_handle;
+      printf("Initiating Target Pairing\n");
+      sm_request_pairing(target_device.con_handle);
+    } else if (host_state != HOST_STATE_CONNECTED && gap_subevent_le_connection_complete_get_role(packet) == HCI_ROLE_SLAVE) {
+      host_device.con_handle = con_handle;
+      memcpy(host_device.addr, addr, sizeof(bd_addr_t));
+      host_set_state(HOST_STATE_CONNECTED);
+    } else {
+      printf("Unknown Device Connected: %s\n", bd_addr_to_str(addr));
+      gap_disconnect(con_handle);
     }
     break;
   case HCI_EVENT_DISCONNECTION_COMPLETE:
-    switch (hci_event_disconnection_complete_get_status(packet)) {
-    case ERROR_CODE_SUCCESS:
-      hci_con_handle_t con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
-      // Prefer explicit handle comparison over role lookup
-      if (con_handle == target_device.con_handle) {
-        target_device.con_handle = HCI_CON_HANDLE_INVALID;
-        target_set_state(TARGET_STATE_SCANNING);
-        break;
-      } else if (con_handle == host_device.con_handle) {
-        // Host disconnected
-        host_device.connected = 0;
-        host_device.con_handle = HCI_CON_HANDLE_INVALID;
-        memset(host_device.addr, 0, sizeof(host_device.addr));
-        host_reports_enabled = false;
-        btstack_run_loop_remove_timer(&host_subscribe_timer);
-        host_set_state(HOST_STATE_ADVERTISING);
-      } else {
-        printf("Unknown Device Disconnected\n");
-      }
+    status = hci_event_disconnection_complete_get_status(packet);
+    if (status != ERROR_CODE_SUCCESS) {
+      printf("Disconnection complete event with error status %u\n", status);
       break;
-    default:
-      break;
+    }
+
+    con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
+    if (con_handle == target_device.con_handle) {
+      target_device.con_handle = HCI_CON_HANDLE_INVALID;
+      target_set_state(TARGET_STATE_SCANNING);
+    } else if (con_handle == host_device.con_handle) {
+      host_device.con_handle = HCI_CON_HANDLE_INVALID;
+      host_set_state(HOST_STATE_ADVERTISING);
+    } else {
+      printf("Unknown Device Disconnected\n");
     }
     break;
   default:
@@ -704,7 +672,8 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
 
   if (packet_type != HCI_EVENT_PACKET)
     return;
-
+  hci_con_handle_t con_handle;
+  uint8_t status;
   switch (hci_event_packet_get_type(packet)) {
   case SM_EVENT_JUST_WORKS_REQUEST:
     printf("Just works requested\n");
@@ -721,43 +690,66 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
            sm_event_passkey_display_number_get_passkey(packet));
     break;
   case SM_EVENT_PAIRING_COMPLETE:
-    switch (sm_event_pairing_complete_get_status(packet)) {
+    status = sm_event_pairing_complete_get_status(packet);
+    con_handle = sm_event_pairing_complete_get_handle(packet);
+    switch (status) {
     case ERROR_CODE_SUCCESS:
       printf("Pairing success\n");
-      if (sm_event_pairing_complete_get_handle(packet) == target_device.con_handle) {
+      if (con_handle == target_device.con_handle) {
         attempt_hids_connect();
-      } else {
-        printf("Unknown device paired\n");
+      } else if (con_handle == host_device.con_handle) {
+        printf("Host paired successfully\n");
+      }
+      break;
+    case ERROR_CODE_CONNECTION_TERMINATED_DUE_TO_MIC_FAILURE:
+      printf("Pairing failed: MIC failure. Deleting bond and retrying.\n");
+      if (con_handle == target_device.con_handle) {
+        gap_delete_bonding(target_device.addr_type, target_device.addr);
+        target_set_state(TARGET_STATE_SCANNING);
+      } else if (con_handle == host_device.con_handle) {
+        gap_delete_bonding(host_device.addr_type, host_device.addr);
+        disconnect_host();
       }
       break;
     default:
-      printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_status(packet));
-      target_set_state(TARGET_STATE_SCANNING);
+      printf("Pairing failed, reason = %u\n", status);
+      if (con_handle == target_device.con_handle) {
+        target_set_state(TARGET_STATE_SCANNING);
+      } else if (con_handle == host_device.con_handle) {
+        disconnect_host();
+      }
       break;
     }
     break;
   case SM_EVENT_REENCRYPTION_STARTED:
-    printf("Re-encryption started\n");
-    hci_con_handle_t con_handle = sm_event_reencryption_started_get_handle(packet);
+    con_handle = sm_event_reencryption_started_get_handle(packet);
     if (con_handle == target_device.con_handle) {
-      target_connecting_state = SM_CONNECTING;
+      printf("Target re-encryption started\n");
       target_set_state(TARGET_STATE_CONNECTING);
+    } else if (con_handle == host_device.con_handle) {
+      printf("Host re-encryption started\n");
+    } else {
+      printf("Unknown re-encryption started\n");
     }
     break;
   case SM_EVENT_REENCRYPTION_COMPLETE:
-    int is_target_event = sm_event_reencryption_complete_get_handle(packet) == target_device.con_handle;
-    switch (sm_event_reencryption_complete_get_status(packet)) {
-    case ERROR_CODE_PIN_OR_KEY_MISSING:
-      printf("Re-encryption failed, PIN or Key missing - retry pairing\n");
-      sm_request_pairing(sm_event_reencryption_complete_get_handle(packet));
-      break;
+    status = sm_event_reencryption_complete_get_status(packet);
+    con_handle = sm_event_reencryption_complete_get_handle(packet);
+    switch (status) {
     case ERROR_CODE_SUCCESS:
-      printf("Re-encryption complete, success\n");
-      if (is_target_event) {
+      if (target_device.con_handle == con_handle) {
+        printf("Target re-encryption complete, success\n");
         attempt_hids_connect();
+      } else if (host_device.con_handle == con_handle) {
+        printf("Host re-encryption complete\n");
       }
       break;
     default:
+      printf("Re-encryption failed, status %u\n", status);
+      if (con_handle == target_device.con_handle) {
+        printf("Retrying target pairing\n");
+        sm_request_pairing(con_handle);
+      }
       break;
     }
   default:
@@ -974,13 +966,4 @@ int main(int argc, const char* argv[])
 
   cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
   btstack_run_loop_execute();
-}
-
-static void host_subscribe_timeout(btstack_timer_source_t* ts)
-{
-  UNUSED(ts);
-  if (host_device.connected && host_device.con_handle != HCI_CON_HANDLE_INVALID && !host_reports_enabled) {
-    printf("Host did not subscribe within timeout, disconnecting to retry...\n");
-    disconnect_host();
-  }
 }
