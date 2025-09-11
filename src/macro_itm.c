@@ -118,8 +118,7 @@ const uint8_t config_adv_data[] = {
     BLUETOOTH_DATA_TYPE_APPEARANCE,
     0xC1,
     0x03,
-    // Complete List of 128-bit Service UUIDs (complete means advertisement
-    // contains all UUIDs available)
+
     0x11,
     BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS, // 0x07
     0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xCD, 0xAB, 0x90,
@@ -316,7 +315,6 @@ static void save_seen_device(bd_addr_t addr, uint8_t addr_type, const uint8_t* a
 
 static void clear_seen_devices()
 {
-    // Optionally zero out entries for cleanliness
     memset(seen_devices, 0, sizeof(seen_devices));
     seen_devices_count = 0;
     printf("Seen devices cleared\n");
@@ -501,8 +499,8 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
     UNUSED(size);
 
     if (packet_type != HCI_EVENT_PACKET
-        || packet_type != HCI_EVENT_GATTSERVICE_META
-        || hci_event_packet_get_type(packet) != HCI_EVENT_GATTSERVICE_META) return;
+        && packet_type != HCI_EVENT_GATTSERVICE_META
+        && hci_event_packet_get_type(packet) != HCI_EVENT_GATTSERVICE_META) return;
 
     switch (hci_event_gattservice_meta_get_subevent_code(packet)) {
     case GATTSERVICE_SUBEVENT_HID_SERVICE_CONNECTED:
@@ -552,7 +550,7 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
 {
     UNUSED(channel);
     UNUSED(size);
-
+    printf("HIDS Host Packet Handler: packet_type=%u\n", packet_type);
     if (packet_type != HCI_EVENT_PACKET) return;
     if (hci_event_packet_get_type(packet) != HCI_EVENT_HIDS_META) return;
 
