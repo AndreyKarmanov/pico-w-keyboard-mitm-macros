@@ -72,7 +72,7 @@ typedef struct {
 static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, false };
 static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 
-#define HID_REPORT_BUFFER_SIZE 64
+#define HID_REPORT_BUFFER_SIZE 16
 static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
 static uint16_t hid_report_len = 0;
 static bool hid_report_pending = false;
@@ -185,6 +185,69 @@ const uint8_t hid_descriptor_keyboard_boot_mode[] = {
     0xc0, // End collection
 };
 
+// HID descriptor for Logitech MX Mechanical, as an example of a more complex descriptor
+const uint8_t hid_descriptor_logitech_mx_keys[] = {
+    // Keyboard
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x06,       // Usage (Keyboard)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x01,       //   Report ID (1)
+    0x05, 0x07,       //   Usage Page (Keyboard/Keypad)
+    0x19, 0xE0,       //   Usage Minimum (Keyboard LeftControl)
+    0x29, 0xE7,       //   Usage Maximum (Keyboard Right GUI)
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x25, 0x01,       //   Logical Maximum (1)
+    0x75, 0x01,       //   Report Size (1)
+    0x95, 0x08,       //   Report Count (8)
+    0x81, 0x02,       //   Input (Data,Var,Abs)
+    0x95, 0x05,       //   Report Count (5)
+    0x05, 0x08,       //   Usage Page (LEDs)
+    0x19, 0x01,       //   Usage Minimum (Num Lock)
+    0x29, 0x05,       //   Usage Maximum (Kana)
+    0x91, 0x02,       //   Output (Data,Var,Abs)
+    0x95, 0x01,       //   Report Count (1)
+    0x75, 0x03,       //   Report Size (3)
+    0x91, 0x01,       //   Output (Cnst,Var,Abs)
+    0x95, 0x06,       //   Report Count (6)
+    0x75, 0x08,       //   Report Size (8)
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x26, 0xA4, 0x00, //   Logical Maximum (164)
+    0x05, 0x07,       //   Usage Page (Keyboard/Keypad)
+    0x19, 0x00,       //   Usage Minimum (Reserved (no event indicated))
+    0x2A, 0xA4, 0x00, //   Usage Maximum (164)
+    0x81, 0x00,       //   Input (Data,Ary,Abs)
+    0xC0,             // End Collection
+
+    // Consumer Control
+    0x05, 0x0C,       // Usage Page (Consumer Devices)
+    0x09, 0x01,       // Usage (Consumer Control)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x03,       //   Report ID (3)
+    0x75, 0x10,       //   Report Size (16)
+    0x95, 0x02,       //   Report Count (2)
+    0x15, 0x01,       //   Logical Minimum (1)
+    0x26, 0xFF, 0x02, //   Logical Maximum (767)
+    0x19, 0x01,       //   Usage Minimum (1)
+    0x2A, 0xFF, 0x02, //   Usage Maximum (767)
+    0x81, 0x60,       //   Input (Data,Var,Rel)
+    0xC0,             // End Collection
+
+    // Logitech Vendor-Specific
+    0x06, 0x43, 0xFF, // Usage Page (Vendor-Defined 1)
+    0x0A, 0x02, 0x02, // Usage (Vendor-Defined 2)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x11,       //   Report ID (17)
+    0x75, 0x08,       //   Report Size (8)
+    0x95, 0x13,       //   Report Count (19)
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x26, 0xFF, 0x00, //   Logical Maximum (255)
+    0x09, 0x02,       //   Usage (Vendor-Defined 2)
+    0x81, 0x00,       //   Input (Data,Ary,Abs)
+    0x09, 0x02,       //   Usage (Vendor-Defined 2)
+    0x91, 0x00,       //   Output (Data,Ary,Abs)
+    0xC0,             // End Collection
+};
+
 static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 
@@ -243,7 +306,6 @@ static void host_set_state(host_state_t new_state)
         memset(host_device.addr, 0, sizeof(host_device.addr));
         break;
     case HOST_STATE_CONNECTED:
-        gap_advertisements_enable(0);
         if (target_state == TARGET_STATE_CONNECTED)
             app_set_state(APP_STATE_READY);
         else
@@ -509,16 +571,19 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
 
     switch (hci_event_gattservice_meta_get_subevent_code(packet)) {
     case GATTSERVICE_SUBEVENT_HID_SERVICE_CONNECTED:
-        if (loaded_hid_descriptor_len == 0) {
-            const uint8_t* desc = hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0);
-            uint16_t desc_len = hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0);
-            print_hid_descriptor(desc, desc_len);
+    {
+        const uint8_t* desc = hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0);
+        uint16_t desc_len = hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0);
+        print_hid_descriptor(desc, desc_len);
+
+        if (loaded_hid_descriptor_len != desc_len) {
             // persist descriptor for later host mirroring setup
             tlv_store_hid_descriptor(desc, desc_len);
             printf("Rebooting in 100ms to apply HID descriptor\n");
             watchdog_reboot(0, 0, 100);
         }
-        break;
+    }
+    break;
     case GATTSERVICE_SUBEVENT_CLIENT_DISCONNECTED:
         printf("HID service client disconnected\n");
         if (target_device.valid) {
@@ -567,26 +632,12 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
         host_device.subscribed_to_reports = hids_subevent_input_report_enable_get_enable(packet) != 0;
         host_protocol_mode = 1; // switch to Report mode on subscription
         printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
-        if (host_device.subscribed_to_reports) {
-            hids_device_request_can_send_now_event(host_device.con_handle);
-            memset(hid_report_buffer, 0, sizeof(hid_report_buffer));
-            hid_report_buffer[0] = 1; // Report ID 1
-            hid_report_pending = true;
-            hid_report_len = 8; // 1 ID + 1 Modifier + 6 Keycodes
-        }
         break;
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
         host_device.con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
         host_device.subscribed_to_reports = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
         host_protocol_mode = 0; // switch to Boot mode on subscription
         printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
-        if (host_device.subscribed_to_reports) {
-            hids_device_request_can_send_now_event(host_device.con_handle);
-            memset(hid_report_buffer, 0, sizeof(hid_report_buffer));
-            hid_report_buffer[0] = 1; // Report ID 1
-            hid_report_pending = true;
-            hid_report_len = 8; // 1 ID + 1 Modifier + 6 Keycodes
-        }
         break;
     case HIDS_SUBEVENT_PROTOCOL_MODE:
         host_protocol_mode = hids_subevent_protocol_mode_get_protocol_mode(packet);
@@ -655,7 +706,7 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
             }
             break;
         default:
-            printf("Pairing failed, reason = %u\n", status);
+            printf("Pairing failed, reason = %u\n", sm_event_pairing_complete_get_reason(packet));
             if (con_handle == target_device.con_handle) {
                 target_set_state(TARGET_STATE_SCANNING);
             } else if (con_handle == host_device.con_handle) {
@@ -774,37 +825,19 @@ int btstack_main(int argc, const char* argv[])
     /* Organized in a chronological manner of what is used and in what order */
     tlv_utils_init();
 
-    // Register for HCI events, main communication channel between btstack and
-    // application
-    hci_event_callback_registration.callback = &hci_packet_handler;
-    hci_add_event_handler(&hci_event_callback_registration);
-
     // setup transport layer
     l2cap_init();
-    
+
     // setup security: handles pairing, authentication, encryption
     sm_init();
     sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
     sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING);
     sm_event_callback_registration.callback = &sm_packet_handler;
-    sm_add_event_handler(&sm_event_callback_registration);
 
     gatt_client_init();
 
-    // setup discovery: advertisements
-    uint16_t adv_int_min = 0x0030;
-    uint16_t adv_int_max = 0x0030;
-    uint8_t adv_type = 0;
-    bd_addr_t null_addr;
-    memset(null_addr, 0, 6);
-    gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
-    gap_advertisements_set_data(config_adv_data_len, (uint8_t*)config_adv_data);
-    gap_scan_response_set_data(scan_response_data_len, (uint8_t*)scan_response_data);
-
-    hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
-
-    // setup attributes: provide access to the services/characteristics/descriptors
     att_server_init(profile_data, att_read_callback, att_write_callback);
+    hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
     device_information_service_server_init();
 
     // setup HID Device service if descriptor is available
@@ -819,8 +852,22 @@ int btstack_main(int argc, const char* argv[])
         printf("No HID descriptor in TLV, using default boot keyboard descriptor\n");
         hids_device_init(0, hid_descriptor_keyboard_boot_mode, sizeof(hid_descriptor_keyboard_boot_mode));
     }
-    hids_device_register_packet_handler(&hids_host_packet_handler);
 
+    // setup discovery: advertisements
+    uint16_t adv_int_min = 0x0030;
+    uint16_t adv_int_max = 0x0030;
+    uint8_t adv_type = 0;
+    bd_addr_t null_addr;
+    memset(null_addr, 0, 6);
+    gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
+    gap_advertisements_set_data(config_adv_data_len, (uint8_t*)config_adv_data);
+    gap_scan_response_set_data(scan_response_data_len, (uint8_t*)scan_response_data);
+    // Register for HCI events, main communication channel between btstack and
+    // application
+    hci_event_callback_registration.callback = &hci_packet_handler;
+    hci_add_event_handler(&hci_event_callback_registration);
+    hids_device_register_packet_handler(&hids_host_packet_handler);
+    sm_add_event_handler(&sm_event_callback_registration);
 
     // turn off stdout buffering to help with debugging (disable in prod tho)
     // setvbuf(stdin, NULL, _IONBF, 0);
