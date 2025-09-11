@@ -62,17 +62,7 @@ static const char* target_state_strings[] = {
 
 static target_device_t target_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
-// Track host (our Peripheral link to PC/Phone)
-typedef struct {
-    bd_addr_type_t addr_type; // best-effort, filled on connect
-    bd_addr_t addr;           // best-effort, filled on connect
-    hci_con_handle_t con_handle;
-    uint8_t report_protocol_mode;
-    bool reports_subscribed;
-} host_device_t;
-
-
-static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, 0, false };
+static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, 0, 0 };
 
 static report_ring_buffer_t hid_report_ring_buffer;
 
@@ -593,12 +583,21 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
         break;
     case GATTSERVICE_SUBEVENT_HID_REPORT:
     {
-        const uint8_t* report = gattservice_subevent_hid_report_get_report(packet);
-        uint16_t report_len = gattservice_subevent_hid_report_get_report_len(packet);
-        print_hid_report(report, report_len);
+        const uint8_t* report_with_id = gattservice_subevent_hid_report_get_report(packet);
+        uint16_t report_len_with_id = gattservice_subevent_hid_report_get_report_len(packet);
+        uint8_t report_id = gattservice_subevent_hid_report_get_report_id(packet);
+        print_hid_report(report_with_id, report_len_with_id);
 
-        if (host_device.reports_subscribed && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
-            if (report_ring_buffer_write(&hid_report_ring_buffer, report, report_len)) {
+        if (host_device.con_handle != HCI_CON_HANDLE_INVALID && (host_device.subscribed_reports_bitmap & (1u << report_id))) {
+            const uint8_t* report_data = report_with_id;
+            uint16_t report_len = report_len_with_id;
+
+            if (report_id > 0) {
+                report_data = report_with_id + 1;
+                report_len = report_len_with_id - 1;
+            }
+
+            if (report_ring_buffer_write(&hid_report_ring_buffer, report_id, report_data, report_len)) {
                 hids_device_request_can_send_now_event(host_device.con_handle);
             } else {
                 printf("Failed to write HID report to ring buffer; it might be full.\n");
@@ -620,31 +619,45 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
     if (hci_event_packet_get_type(packet) != HCI_EVENT_HIDS_META) return;
 
     switch (hci_event_hids_meta_get_subevent_code(packet)) {
-    case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
-        host_device.reports_subscribed = hids_subevent_input_report_enable_get_enable(packet) != 0;
+    case HIDS_SUBEVENT_INPUT_REPORT_ENABLE: {
+        bool enabled = hids_subevent_input_report_enable_get_enable(packet) != 0;
+        uint8_t report_id = hids_subevent_input_report_enable_get_report_id(packet);
+        if (enabled) {
+            host_device.subscribed_reports_bitmap |= (1u << report_id);
+        } else {
+            host_device.subscribed_reports_bitmap &= ~(1u << report_id);
+        }
         host_device.report_protocol_mode = 1;
-        printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.reports_subscribed);
+        printf("Host %s to input report ID %u (con_handle=0x%04X, bitmap=0x%08lX)\n", enabled ? "subscribed" : "unsubscribed", report_id, host_device.con_handle, host_device.subscribed_reports_bitmap);
         break;
+    }
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
-        host_device.reports_subscribed = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
+        // For boot protocol, we can assume report ID 1 for keyboard
+        if (hids_subevent_boot_keyboard_input_report_enable_get_enable(packet)) {
+            host_device.subscribed_reports_bitmap |= (1u << 1);
+        } else {
+            host_device.subscribed_reports_bitmap &= ~(1u << 1);
+        }
         host_device.report_protocol_mode = 0;
-        printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.reports_subscribed);
+        printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, (host_device.subscribed_reports_bitmap & (1u << 1)) != 0);
         break;
     case HIDS_SUBEVENT_PROTOCOL_MODE:
         host_device.report_protocol_mode = hids_subevent_protocol_mode_get_protocol_mode(packet);
         printf("Host protocol mode set to %s\n", host_device.report_protocol_mode ? "Report" : "Boot");
         break;
     case HIDS_SUBEVENT_CAN_SEND_NOW:
-        if (!report_ring_buffer_is_empty(&hid_report_ring_buffer) && host_device.reports_subscribed && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+        if (!report_ring_buffer_is_empty(&hid_report_ring_buffer) && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
             uint8_t report_buf[MAX_REPORT_LEN];
-            int16_t report_len = report_ring_buffer_read(&hid_report_ring_buffer, report_buf, sizeof(report_buf));
+            uint8_t report_id;
+            int16_t report_len = report_ring_buffer_read(&hid_report_ring_buffer, &report_id, report_buf, sizeof(report_buf));
 
             if (report_len > 0) {
-                printf("Sending HID report to host (len=%u, mode=%s)\n", report_len, host_device.report_protocol_mode == 0 ? "Boot" : "Report");
+                printf("Sending HID report to host (id=%u, len=%u, mode=%s)\n", report_id, report_len, host_device.report_protocol_mode == 0 ? "Boot" : "Report");
                 if (host_device.report_protocol_mode == 0) {
+                    // Boot protocol doesn't use report IDs, but we assume it's a keyboard report
                     hids_device_send_boot_keyboard_input_report(host_device.con_handle, report_buf, report_len);
                 } else {
-                    hids_device_send_input_report(host_device.con_handle, report_buf, report_len);
+                    hids_device_send_input_report_for_id(host_device.con_handle, report_id, report_buf, report_len);
                 }
             }
 

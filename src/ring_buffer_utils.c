@@ -6,12 +6,12 @@ void report_ring_buffer_init(report_ring_buffer_t* rb) {
     memset(rb, 0, sizeof(report_ring_buffer_t));
 }
 
-bool report_ring_buffer_write(report_ring_buffer_t* rb, const uint8_t* data, uint8_t len) {
+bool report_ring_buffer_write(report_ring_buffer_t* rb, uint8_t report_id, const uint8_t* data, uint8_t len) {
     if (len == 0 || len > MAX_REPORT_LEN) {
         return false;
     }
 
-    // Check for space: 1 byte for length + len for data
+    // Check for space: 1 for report_id, 1 for length, len for data
     uint16_t free_space;
     if (rb->head >= rb->tail) {
         free_space = REPORT_RING_BUFFER_SIZE - (rb->head - rb->tail);
@@ -19,12 +19,14 @@ bool report_ring_buffer_write(report_ring_buffer_t* rb, const uint8_t* data, uin
         free_space = rb->tail - rb->head;
     }
 
-    if (free_space < (len + 1)) {
+    if (free_space < (len + 2)) {
         printf("Ring buffer full\n");
         return false;
     }
 
-    // Write length
+    // Write report_id and length
+    rb->buffer[rb->head] = report_id;
+    rb->head = (rb->head + 1) % REPORT_RING_BUFFER_SIZE;
     rb->buffer[rb->head] = len;
     rb->head = (rb->head + 1) % REPORT_RING_BUFFER_SIZE;
 
@@ -44,12 +46,14 @@ bool report_ring_buffer_write(report_ring_buffer_t* rb, const uint8_t* data, uin
     return true;
 }
 
-int16_t report_ring_buffer_read(report_ring_buffer_t* rb, uint8_t* data, uint8_t max_len) {
+int16_t report_ring_buffer_read(report_ring_buffer_t* rb, uint8_t* report_id, uint8_t* data, uint8_t max_len) {
     if (report_ring_buffer_is_empty(rb)) {
         return -1;
     }
 
-    // Read length
+    // Read report_id and length
+    *report_id = rb->buffer[rb->tail];
+    rb->tail = (rb->tail + 1) % REPORT_RING_BUFFER_SIZE;
     uint8_t len = rb->buffer[rb->tail];
     rb->tail = (rb->tail + 1) % REPORT_RING_BUFFER_SIZE;
 
