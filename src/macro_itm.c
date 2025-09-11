@@ -106,17 +106,18 @@ const uint8_t config_adv_data[] = {
     BLUETOOTH_DATA_TYPE_APPEARANCE,
     0xC1,
     0x03,
-
-    0x11,
-    BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS, // 0x07
-    0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xCD, 0xAB, 0x90,
-    0x78, 0x56, 0x34, 0x12, /* 128-bit UUIDs: 12345678-90AB-CDEF-0123-456789ABCDEF */
 };
 const uint8_t config_adv_data_len = sizeof(config_adv_data);
 
 const uint8_t scan_response_data[] = {
     // Name
     0x05, BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME, 'M', 'I', 'T', 'M', // "MITM"
+
+    // 128-bit Service UUID
+    0x11,
+    BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
+    0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01, 0xEF, 0xCD, 0xAB, 0x90,
+    0x78, 0x56, 0x34, 0x12,
 };
 const uint8_t scan_response_data_len = sizeof(scan_response_data);
 
@@ -449,12 +450,23 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
             break;
         }
         break;
-    case GAP_EVENT_ADVERTISING_REPORT:
-        const uint8_t* data = gap_event_advertising_report_get_data(packet);
-        uint8_t data_len = gap_event_advertising_report_get_data_length(packet);
+    case GAP_EVENT_ADVERTISING_REPORT: {
         bd_addr_t address;
         gap_event_advertising_report_get_address(packet, address);
         uint8_t addr_type = gap_event_advertising_report_get_address_type(packet);
+        const uint8_t* data = gap_event_advertising_report_get_data(packet);
+        uint8_t data_len = gap_event_advertising_report_get_data_length(packet);
+
+        if (target_device.valid && bd_addr_cmp(address, target_device.addr) == 0) {
+            uint8_t event_type = gap_event_advertising_report_get_advertising_event_type(packet);
+            if (event_type == 0x04) { // SCAN_RSP
+                printf("Target scan response:\n");
+            } else {
+                printf("Target advertising report:\n");
+            }
+            printf("  Address: %s, Type: %u\n", bd_addr_to_str(address), addr_type);
+            printf_hexdump(data, data_len);
+        }
 
         save_seen_device(address, addr_type, data, data_len);
 
@@ -466,6 +478,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
             attempt_gap_connect();
         }
         break;
+    }
     case HCI_EVENT_META_GAP:
         if (hci_event_gap_meta_get_subevent_code(packet) != GAP_SUBEVENT_LE_CONNECTION_COMPLETE)
             break;
