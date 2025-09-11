@@ -1,24 +1,19 @@
 #include "macro_itm.h"
 
-#include <btstack_tlv.h>
-#include <ctype.h>
 #include <inttypes.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
 
-#include "btstack.h"
-#include "btstack_config.h"
-#include "pico/cyw43_arch.h"
-#include "pico/stdio.h"
-#include "pico/time.h"
-#include "hardware/watchdog.h"
+#include <pico/cyw43_arch.h>
+#include <pico/stdio.h>
+#include <hardware/watchdog.h>
 
-#include "ble/gatt-service/hids_device.h"
-// Optional but common for HID keyboards, helps some hosts
-#include "ble/gatt-service/battery_service_server.h"
+#include <btstack.h>
+#include <btstack_tlv.h>
+#include <btstack_config.h>
+
+#include "macro_itm_types.h"
+#include "tlv_utils.h"
+#include "print_utils.h"
+
 
 typedef enum {
   APP_STATE_IDLE = 0,
@@ -62,18 +57,7 @@ static const char* target_state_strings[] = {
   "CONNECTED",
 };
 
-// TLV tag for target device ('TRGT')
-#define TLV_TAG_TARGET_DEVICE 0x54524754u
-// TLV tag for HID descriptor ('HIDD')
-#define TLV_TAG_HID_DESCRIPTOR 0x48494444u
-
-typedef struct {
-  bd_addr_t addr;
-  bd_addr_type_t addr_type;
-  char name[32];
-  hci_con_handle_t con_handle;
-  bool valid;
-} target_device_t;
+// target_device_t moved to app/macro_itm_types.h
 
 static target_device_t target_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
@@ -116,90 +100,7 @@ static btstack_timer_source_t target_connection_timer;
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
 
-static const btstack_tlv_t* tlv_impl;
-static void* tlv_context;
-
-// Parser used by TLV helpers and ATT writes
-static target_device_t parse_device_string(const char* s, uint16_t s_len)
-{
-  target_device_t temp_device = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
-
-  char temp_addr_s[18];
-  char s_buf[65]; // max 64 chars + null terminator
-  if (s_len >= sizeof(s_buf)) {
-    return temp_device;
-  }
-  memcpy(s_buf, s, s_len);
-  s_buf[s_len] = '\0';
-
-  // "AA:BB:CC:DD:EE:FF,<type>,<name>"
-  int result = sscanf(s_buf, "%17[^,],%hhu,%31[^\r\n]", temp_addr_s, &temp_device.addr_type, temp_device.name);
-
-  if (result == 3) {
-    temp_device.valid = sscanf_bd_addr(temp_addr_s, temp_device.addr);
-  }
-
-  return temp_device;
-}
-
-static void tlv_delete_target()
-{
-  if (!tlv_impl) return;
-  tlv_impl->delete_tag(tlv_context, TLV_TAG_TARGET_DEVICE);
-}
-
-// Persist as a single ASCII line: "AA:BB:CC:DD:EE:FF,<type>,<name>"
-static target_device_t tlv_load_target_device()
-{
-  if (!tlv_impl) return (target_device_t) { { 0 }, 0, "", HCI_CON_HANDLE_INVALID, 0 };
-  uint8_t s_buf[64];
-  int len = tlv_impl->get_tag(tlv_context, TLV_TAG_TARGET_DEVICE, s_buf, sizeof(s_buf));
-  return parse_device_string((const char*)s_buf, (uint16_t)len);
-}
-
-static void tlv_store_target_device(const target_device_t* dev)
-{
-  if (!tlv_impl || !dev || !dev->valid) return;
-  char s_buf[64];
-  int n = snprintf(s_buf, sizeof(s_buf), "%s,%u,%s", bd_addr_to_str(dev->addr), (unsigned)dev->addr_type, dev->name);
-  if (n < 0) return;
-  size_t len = (size_t)n;
-  if (len > sizeof(s_buf)) len = sizeof(s_buf);
-  tlv_impl->store_tag(tlv_context, TLV_TAG_TARGET_DEVICE, (const uint8_t*)s_buf, (uint32_t)len);
-}
-
-static uint16_t tlv_load_hid_descriptor(uint8_t* buffer, uint16_t buffer_size)
-{
-  if (!tlv_impl) return 0;
-  int len = tlv_impl->get_tag(tlv_context, TLV_TAG_HID_DESCRIPTOR, buffer, buffer_size);
-  if (len > 0) {
-    printf("Loaded HID descriptor from TLV (len=%u)\n", len);
-    return (uint16_t)len;
-  }
-  return 0;
-}
-
-static void tlv_store_hid_descriptor(const uint8_t* descriptor, uint16_t len)
-{
-  if (!tlv_impl || descriptor == NULL || len == 0) return;
-  tlv_impl->store_tag(tlv_context, TLV_TAG_HID_DESCRIPTOR, descriptor, len);
-  printf("Stored HID descriptor in TLV (len=%u)\n", len);
-}
-
-static void save_target_if_needed()
-{
-  if (!target_device.valid) return;
-  target_device_t persisted = tlv_load_target_device();
-  if (persisted.valid
-      && (bd_addr_cmp(persisted.addr, target_device.addr) == 0)
-      && (persisted.addr_type == target_device.addr_type)
-      && (strncmp(persisted.name, target_device.name, sizeof(persisted.name)) == 0)) {
-    printf("Persisted target matches, not updating\n");
-    return;
-  }
-  printf("Persisted target differs, replacing\n");
-  tlv_store_target_device(&target_device);
-}
+// TLV backend and helpers are implemented in app/tlv_utils.*
 
 // Config Advertisement Data
 const uint8_t config_adv_data[] = {
@@ -264,7 +165,7 @@ static void target_set_state(target_state_t new_state)
       app_set_state(APP_STATE_ACTIVE);
     }
     // Persist target info when we complete target connection flow
-    save_target_if_needed();
+    tlv_save_target_if_needed(&target_device);
     break;
   }
 }
@@ -423,35 +324,7 @@ static uint16_t build_seen_devices_listing(uint8_t* out, uint16_t max_len)
   return pos;
 }
 
-void print_hid_report(const uint8_t* report, uint16_t len)
-{
-  char buffer[1024];  // adjust size depending on max HID report length
-  int offset = 0;
-
-  offset += snprintf(buffer + offset, sizeof(buffer) - offset, "HID Report: ");
-
-  for (uint16_t i = 0; i < len && offset < (int)sizeof(buffer); i++) {
-    offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%02X ", report[i]);
-  }
-
-  snprintf(buffer + offset, sizeof(buffer) - offset, "\n");
-  printf("%s", buffer);
-}
-
-void print_hid_descriptor(const uint8_t* descriptor, uint16_t len)
-{
-  char buffer[2048];  // adjust size depending on max HID descriptor length
-  int offset = 0;
-
-  offset += snprintf(buffer + offset, sizeof(buffer) - offset, "HID Descriptor: ");
-
-  for (uint16_t i = 0; i < len && offset < (int)sizeof(buffer); i++) {
-    offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%02X ", descriptor[i]);
-  }
-
-  snprintf(buffer + offset, sizeof(buffer) - offset, "\n");
-  printf("%s", buffer);
-}
+// printing helpers moved to app/print_utils.*
 
 void attempt_hids_connect()
 {
@@ -795,7 +668,7 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
     } else {
       printf("Trying to set target device: %.*s\n", buffer_size, buffer);
 
-      target_device_t temp_device = parse_device_string((const char*)buffer, buffer_size);
+      target_device_t temp_device = tlv_parse_device_string((const char*)buffer, buffer_size);
 
       if (!temp_device.valid) {
         printf("Invalid target format\n");
@@ -880,7 +753,7 @@ int btstack_main(int argc, const char* argv[])
   UNUSED(argv);
 
   /* Organized in a chronological manner of what is used and in what order */
-  btstack_tlv_get_instance(&tlv_impl, &tlv_context);
+  tlv_utils_init();
 
   // Register for HCI events, main communication channel between btstack and
   // application
