@@ -72,7 +72,7 @@ typedef struct {
 static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, false };
 static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 
-#define HID_REPORT_BUFFER_SIZE 7
+#define HID_REPORT_BUFFER_SIZE 64
 static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
 static uint16_t hid_report_len = 0;
 static bool hid_report_pending = false;
@@ -233,11 +233,13 @@ static void host_set_state(host_state_t new_state)
     case HOST_STATE_IDLE:
         gap_advertisements_enable(0);
         host_device.con_handle = HCI_CON_HANDLE_INVALID;
+        host_device.addr_type = 0;
         memset(host_device.addr, 0, sizeof(host_device.addr));
         break;
     case HOST_STATE_ADVERTISING:
         gap_advertisements_enable(1);
         host_device.con_handle = HCI_CON_HANDLE_INVALID;
+        host_device.addr_type = 0;
         memset(host_device.addr, 0, sizeof(host_device.addr));
         break;
     case HOST_STATE_CONNECTED:
@@ -436,6 +438,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         } else if (host_state != HOST_STATE_CONNECTED && gap_subevent_le_connection_complete_get_role(packet) == HCI_ROLE_SLAVE) {
             host_device.con_handle = con_handle;
             memcpy(host_device.addr, addr, sizeof(bd_addr_t));
+            host_device.addr_type = gap_subevent_le_connection_complete_get_peer_address_type(packet);
             host_set_state(HOST_STATE_CONNECTED);
         } else {
             printf("Unknown Device Connected: %s\n", bd_addr_to_str(addr));
@@ -450,6 +453,8 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
         }
 
         con_handle = hci_event_disconnection_complete_get_connection_handle(packet);
+        uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
+        printf("Disconnection reason: 0x%02X\n", reason);
         if (con_handle == target_device.con_handle) {
             target_device.con_handle = HCI_CON_HANDLE_INVALID;
             target_set_state(TARGET_STATE_SCANNING);
@@ -564,8 +569,10 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
         printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
         if (host_device.subscribed_to_reports) {
             hids_device_request_can_send_now_event(host_device.con_handle);
-            hid_report_pending = true; // trigger sending any pending report
             memset(hid_report_buffer, 0, sizeof(hid_report_buffer));
+            hid_report_buffer[0] = 1; // Report ID 1
+            hid_report_pending = true;
+            hid_report_len = 8; // 1 ID + 1 Modifier + 6 Keycodes
         }
         break;
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
@@ -575,6 +582,10 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
         printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
         if (host_device.subscribed_to_reports) {
             hids_device_request_can_send_now_event(host_device.con_handle);
+            memset(hid_report_buffer, 0, sizeof(hid_report_buffer));
+            hid_report_buffer[0] = 1; // Report ID 1
+            hid_report_pending = true;
+            hid_report_len = 8; // 1 ID + 1 Modifier + 6 Keycodes
         }
         break;
     case HIDS_SUBEVENT_PROTOCOL_MODE:
@@ -583,7 +594,7 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
         break;
     case HIDS_SUBEVENT_CAN_SEND_NOW:
         if (hid_report_pending && host_device.subscribed_to_reports && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
-            printf("Sending HID report to host\n");
+            printf("Sending HID report to host (len=%u, mode=%s)\n", hid_report_len, host_protocol_mode == 0 ? "Boot" : "Report");
             if (host_protocol_mode == 0) {
                 hids_device_send_boot_keyboard_input_report(host_device.con_handle, hid_report_buffer, hid_report_len);
             } else {
