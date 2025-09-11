@@ -72,7 +72,7 @@ typedef struct {
 static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, false };
 static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 
-#define HID_REPORT_BUFFER_SIZE 16
+#define HID_REPORT_BUFFER_SIZE 64
 static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
 static uint16_t hid_report_len = 0;
 static bool hid_report_pending = false;
@@ -247,6 +247,9 @@ const uint8_t hid_descriptor_logitech_mx_keys[] = {
     0x91, 0x00,       //   Output (Data,Ary,Abs)
     0xC0,             // End Collection
 };
+
+static uint8_t hid_descriptor[600];
+static uint16_t hid_descriptor_len = 0;
 
 static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
@@ -836,13 +839,13 @@ int btstack_main(int argc, const char* argv[])
 
     gatt_client_init();
 
-    att_server_init(profile_data, att_read_callback, att_write_callback);
     hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
+    att_server_init(profile_data, att_read_callback, att_write_callback);
     device_information_service_server_init();
 
     // setup HID Device service if descriptor is available
-    uint8_t hid_descriptor[500];
-    uint16_t hid_descriptor_len = tlv_load_hid_descriptor(hid_descriptor, sizeof(hid_descriptor));
+    memset(hid_descriptor, 0, sizeof(hid_descriptor));
+    hid_descriptor_len = tlv_load_hid_descriptor(hid_descriptor, sizeof(hid_descriptor));
     loaded_hid_descriptor_len = hid_descriptor_len;
     printf("HID descriptor length from TLV: %u\n", hid_descriptor_len);
     if (hid_descriptor_len > 0) {
