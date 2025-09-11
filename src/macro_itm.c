@@ -72,7 +72,7 @@ typedef struct {
 static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, false };
 static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 
-#define HID_REPORT_BUFFER_SIZE 16
+#define HID_REPORT_BUFFER_SIZE 7
 static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
 static uint16_t hid_report_len = 0;
 static bool hid_report_pending = false;
@@ -552,21 +552,27 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
     UNUSED(size);
     printf("HIDS Host Packet Handler: packet_type=%u\n", packet_type);
     if (packet_type != HCI_EVENT_PACKET) return;
+    printf("HIDS Host Packet Handler: hci_packet_type=%u\n", hci_event_packet_get_type(packet));
     if (hci_event_packet_get_type(packet) != HCI_EVENT_HIDS_META) return;
+    printf("HIDS Host Packet Handler: hci_subevent_code=%u\n", hci_event_hids_meta_get_subevent_code(packet));
 
     switch (hci_event_hids_meta_get_subevent_code(packet)) {
     case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
         host_device.con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
         host_device.subscribed_to_reports = hids_subevent_input_report_enable_get_enable(packet) != 0;
-        printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_input_report_enable_get_enable(packet));
+        host_protocol_mode = 1; // switch to Report mode on subscription
+        printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
         if (host_device.subscribed_to_reports) {
             hids_device_request_can_send_now_event(host_device.con_handle);
+            hid_report_pending = true; // trigger sending any pending report
+            memset(hid_report_buffer, 0, sizeof(hid_report_buffer));
         }
         break;
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
         host_device.con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
         host_device.subscribed_to_reports = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
-        printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, hids_subevent_boot_keyboard_input_report_enable_get_enable(packet));
+        host_protocol_mode = 0; // switch to Boot mode on subscription
+        printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
         if (host_device.subscribed_to_reports) {
             hids_device_request_can_send_now_event(host_device.con_handle);
         }
@@ -675,6 +681,9 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
             if (con_handle == target_device.con_handle) {
                 printf("Retrying target pairing\n");
                 sm_request_pairing(con_handle);
+            } else if (con_handle == host_device.con_handle) {
+                printf("Disconnecting host due to re-encryption failure\n");
+                disconnect_host();
             }
             break;
         }
@@ -761,6 +770,15 @@ int btstack_main(int argc, const char* argv[])
 
     // setup transport layer
     l2cap_init();
+    
+    // setup security: handles pairing, authentication, encryption
+    sm_init();
+    sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING);
+    sm_event_callback_registration.callback = &sm_packet_handler;
+    sm_add_event_handler(&sm_event_callback_registration);
+
+    gatt_client_init();
 
     // setup discovery: advertisements
     uint16_t adv_int_min = 0x0030;
@@ -772,24 +790,11 @@ int btstack_main(int argc, const char* argv[])
     gap_advertisements_set_data(config_adv_data_len, (uint8_t*)config_adv_data);
     gap_scan_response_set_data(scan_response_data_len, (uint8_t*)scan_response_data);
 
+    hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
+
     // setup attributes: provide access to the services/characteristics/descriptors
     att_server_init(profile_data, att_read_callback, att_write_callback);
     device_information_service_server_init();
-
-
-    // setup security: handles pairing, authentication, encryption
-    sm_init();
-    sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
-    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING);
-    sm_event_callback_registration.callback = &sm_packet_handler;
-    sm_add_event_handler(&sm_event_callback_registration);
-
-    // Init GATT Client to enable reading profiles?
-    // TODO: see if this is needed
-    gatt_client_init();
-
-    // Init HID Service Client to access HID over GATT Service on target
-    hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
 
     // setup HID Device service if descriptor is available
     uint8_t hid_descriptor[500];
