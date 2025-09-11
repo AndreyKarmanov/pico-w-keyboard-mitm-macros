@@ -13,6 +13,7 @@
 #include "macro_itm_types.h"
 #include "tlv_utils.h"
 #include "print_utils.h"
+#include "ring_buffer_utils.h"
 
 
 typedef enum {
@@ -66,21 +67,20 @@ typedef struct {
     bd_addr_type_t addr_type; // best-effort, filled on connect
     bd_addr_t addr;           // best-effort, filled on connect
     hci_con_handle_t con_handle;
-    bool subscribed_to_reports;
+    uint8_t report_protocol_mode;
+    bool reports_subscribed;
 } host_device_t;
 
-static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, false };
-static uint8_t host_protocol_mode = 1; // 1 = Report, 0 = Boot
 
-#define HID_REPORT_BUFFER_SIZE 64
-static uint8_t hid_report_buffer[HID_REPORT_BUFFER_SIZE];
-static uint16_t hid_report_len = 0;
-static bool hid_report_pending = false;
+static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, 0, false };
+
+static report_ring_buffer_t hid_report_ring_buffer;
 
 static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
-static uint16_t loaded_hid_descriptor_len = 0;
 
+static uint8_t hid_descriptor[600];
+static uint16_t hid_descriptor_len = 0;
 
 #define MAX_SEEN_DEVICES 32
 
@@ -99,8 +99,6 @@ static btstack_timer_source_t target_connection_timer;
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static btstack_packet_callback_registration_t sm_event_callback_registration;
-
-// TLV backend and helpers are implemented in app/tlv_utils.*
 
 // Config Advertisement Data
 const uint8_t config_adv_data[] = {
@@ -248,9 +246,6 @@ const uint8_t hid_descriptor_logitech_mx_keys[] = {
     0xC0,             // End Collection
 };
 
-static uint8_t hid_descriptor[600];
-static uint16_t hid_descriptor_len = 0;
-
 static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 
@@ -330,7 +325,7 @@ static void clear_target_device()
     // the con_handle should only be removed in disconnection complete event
     printf("Clearing target device\n");
     tlv_delete_target();
-    loaded_hid_descriptor_len = 0;
+    hid_descriptor_len = 0;
     target_device.valid = 0;
     target_set_state(TARGET_STATE_SCANNING);
 }
@@ -579,7 +574,7 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
         uint16_t desc_len = hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0);
         print_hid_descriptor(desc, desc_len);
 
-        if (loaded_hid_descriptor_len != desc_len) {
+        if (hid_descriptor_len != desc_len) {
             // persist descriptor for later host mirroring setup
             tlv_store_hid_descriptor(desc, desc_len);
             printf("Rebooting in 100ms to apply HID descriptor\n");
@@ -602,14 +597,11 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
         uint16_t report_len = gattservice_subevent_hid_report_get_report_len(packet);
         print_hid_report(report, report_len);
 
-        if (host_device.subscribed_to_reports && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
-            if (report_len <= HID_REPORT_BUFFER_SIZE) {
-                memcpy(hid_report_buffer, report, report_len);
-                hid_report_len = report_len;
-                hid_report_pending = true;
+        if (host_device.reports_subscribed && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+            if (report_ring_buffer_write(&hid_report_ring_buffer, report, report_len)) {
                 hids_device_request_can_send_now_event(host_device.con_handle);
             } else {
-                printf("HID report too large for buffer\n");
+                printf("Failed to write HID report to ring buffer; it might be full.\n");
             }
         }
     }
@@ -623,38 +615,43 @@ static void hids_host_packet_handler(uint8_t packet_type, uint16_t channel, uint
 {
     UNUSED(channel);
     UNUSED(size);
-    printf("HIDS Host Packet Handler: packet_type=%u\n", packet_type);
+
     if (packet_type != HCI_EVENT_PACKET) return;
-    printf("HIDS Host Packet Handler: hci_packet_type=%u\n", hci_event_packet_get_type(packet));
     if (hci_event_packet_get_type(packet) != HCI_EVENT_HIDS_META) return;
-    printf("HIDS Host Packet Handler: hci_subevent_code=%u\n", hci_event_hids_meta_get_subevent_code(packet));
 
     switch (hci_event_hids_meta_get_subevent_code(packet)) {
     case HIDS_SUBEVENT_INPUT_REPORT_ENABLE:
-        host_device.con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
-        host_device.subscribed_to_reports = hids_subevent_input_report_enable_get_enable(packet) != 0;
-        host_protocol_mode = 1; // switch to Report mode on subscription
-        printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
+        host_device.reports_subscribed = hids_subevent_input_report_enable_get_enable(packet) != 0;
+        host_device.report_protocol_mode = 1;
+        printf("Host subscribed to input reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.reports_subscribed);
         break;
     case HIDS_SUBEVENT_BOOT_KEYBOARD_INPUT_REPORT_ENABLE:
-        host_device.con_handle = hids_subevent_boot_keyboard_input_report_enable_get_con_handle(packet);
-        host_device.subscribed_to_reports = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
-        host_protocol_mode = 0; // switch to Boot mode on subscription
-        printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.subscribed_to_reports);
+        host_device.reports_subscribed = hids_subevent_boot_keyboard_input_report_enable_get_enable(packet) != 0;
+        host_device.report_protocol_mode = 0;
+        printf("Host subscribed to boot keyboard reports (con_handle=0x%04X, enabled=%u)\n", host_device.con_handle, host_device.reports_subscribed);
         break;
     case HIDS_SUBEVENT_PROTOCOL_MODE:
-        host_protocol_mode = hids_subevent_protocol_mode_get_protocol_mode(packet);
-        printf("Host protocol mode set to %s\n", host_protocol_mode ? "Report" : "Boot");
+        host_device.report_protocol_mode = hids_subevent_protocol_mode_get_protocol_mode(packet);
+        printf("Host protocol mode set to %s\n", host_device.report_protocol_mode ? "Report" : "Boot");
         break;
     case HIDS_SUBEVENT_CAN_SEND_NOW:
-        if (hid_report_pending && host_device.subscribed_to_reports && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
-            printf("Sending HID report to host (len=%u, mode=%s)\n", hid_report_len, host_protocol_mode == 0 ? "Boot" : "Report");
-            if (host_protocol_mode == 0) {
-                hids_device_send_boot_keyboard_input_report(host_device.con_handle, hid_report_buffer, hid_report_len);
-            } else {
-                hids_device_send_input_report(host_device.con_handle, hid_report_buffer, hid_report_len);
+        if (!report_ring_buffer_is_empty(&hid_report_ring_buffer) && host_device.reports_subscribed && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+            uint8_t report_buf[MAX_REPORT_LEN];
+            int16_t report_len = report_ring_buffer_read(&hid_report_ring_buffer, report_buf, sizeof(report_buf));
+
+            if (report_len > 0) {
+                printf("Sending HID report to host (len=%u, mode=%s)\n", report_len, host_device.report_protocol_mode == 0 ? "Boot" : "Report");
+                if (host_device.report_protocol_mode == 0) {
+                    hids_device_send_boot_keyboard_input_report(host_device.con_handle, report_buf, report_len);
+                } else {
+                    hids_device_send_input_report(host_device.con_handle, report_buf, report_len);
+                }
             }
-            hid_report_pending = false;
+
+            // If there are more reports, request to send again
+            if (!report_ring_buffer_is_empty(&hid_report_ring_buffer)) {
+                hids_device_request_can_send_now_event(host_device.con_handle);
+            }
         }
         break;
     default:
@@ -760,7 +757,6 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
 static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
 {
     if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE) {
-        // Now returns lines: MAC,TYPE,NAME
         static uint8_t devices_buf[SEEN_DEVICES_CHAR_BUFFER_SIZE];
         uint16_t len = build_seen_devices_listing(devices_buf, sizeof(devices_buf));
         return att_read_callback_handle_blob(devices_buf, len, offset, buffer, buffer_size);
@@ -797,7 +793,7 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
             target_device_t temp_device = tlv_parse_device_string((const char*)buffer, buffer_size);
 
             if (!temp_device.valid) {
-                printf("Invalid target format\n");
+                printf("Invalid target\n");
                 return 0;
             }
 
@@ -827,6 +823,7 @@ int btstack_main(int argc, const char* argv[])
 
     /* Organized in a chronological manner of what is used and in what order */
     tlv_utils_init();
+    report_ring_buffer_init(&hid_report_ring_buffer);
 
     // setup transport layer
     l2cap_init();
@@ -846,7 +843,6 @@ int btstack_main(int argc, const char* argv[])
     // setup HID Device service if descriptor is available
     memset(hid_descriptor, 0, sizeof(hid_descriptor));
     hid_descriptor_len = tlv_load_hid_descriptor(hid_descriptor, sizeof(hid_descriptor));
-    loaded_hid_descriptor_len = hid_descriptor_len;
     printf("HID descriptor length from TLV: %u\n", hid_descriptor_len);
     if (hid_descriptor_len > 0) {
         printf("HID descriptor loaded from TLV, initializing HID Device Service\n");
