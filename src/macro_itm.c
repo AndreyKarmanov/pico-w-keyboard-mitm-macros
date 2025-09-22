@@ -62,9 +62,10 @@ static const char* target_state_strings[] = {
 
 static target_device_t target_device = { {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
 
-static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, 0, 0 };
+static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, 0, 0, false };
 
 static report_ring_buffer_t hid_report_ring_buffer;
+static report_ring_buffer_t debug_report_ring_buffer;
 
 static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
@@ -317,7 +318,7 @@ static void clear_target_device()
     printf("Clearing target device\n");
     tlv_delete_target();
     hid_descriptor_len = 0;
-    target_device.valid = 0;
+    target_device.valid = false;
     target_set_state(TARGET_STATE_SCANNING);
 }
 
@@ -601,7 +602,11 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
         uint8_t report_id = gattservice_subevent_hid_report_get_report_id(packet);
         print_hid_report(report_with_id, report_len_with_id);
 
-        if (host_device.con_handle != HCI_CON_HANDLE_INVALID && (host_device.subscribed_reports_bitmap & (1u << report_id))) {
+        if (host_device.con_handle == HCI_CON_HANDLE_INVALID)
+            break;
+
+
+        if (host_device.subscribed_reports_bitmap & (1u << report_id)) {
             const uint8_t* report_data = report_with_id;
             uint16_t report_len = report_len_with_id;
 
@@ -616,6 +621,24 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
                 printf("Failed to write HID report to ring buffer; it might be full.\n");
             }
         }
+
+        if (host_device.enabled_notifications && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
+            // Push into debug ring buffer as (id, payload)
+            const uint8_t* payload = report_with_id;
+            uint16_t payload_len = report_len_with_id;
+            if (report_id > 0) {
+                // report_with_id starts with ID byte when ID>0; exclude it for payload
+                payload = report_with_id + 1;
+                payload_len = report_len_with_id - 1;
+            }
+            if (payload_len > MAX_REPORT_LEN) payload_len = MAX_REPORT_LEN;
+            if (report_ring_buffer_write(&debug_report_ring_buffer, report_id, payload, (uint8_t)payload_len)) {
+                att_server_request_can_send_now_event(host_device.con_handle);
+            } else {
+                printf("Debug notify ring full, dropping report id=%u len=%u\n", report_id, payload_len);
+            }
+        }
+
     }
     break;
     default:
@@ -780,22 +803,35 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pa
     }
 }
 
+
+
 static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t att_handle, uint16_t offset, uint8_t* buffer, uint16_t buffer_size)
 {
-    if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE) {
-        static uint8_t devices_buf[SEEN_DEVICES_CHAR_BUFFER_SIZE];
-        uint16_t len = build_seen_devices_listing(devices_buf, sizeof(devices_buf));
-        return att_read_callback_handle_blob(devices_buf, len, offset, buffer, buffer_size);
-    } else if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE) {
-        static char target_buf[55];
-        uint16_t len = 0;
-        if (target_device.valid) {
-            len = (uint16_t)snprintf(target_buf, sizeof(target_buf), "%s,%u,%s", bd_addr_to_str(target_device.addr), target_device.addr_type, target_device.name);
-        } else {
-            target_buf[0] = '\0';
-            len = 0;
+    static uint8_t devices_buf[SEEN_DEVICES_CHAR_BUFFER_SIZE];
+    static uint16_t devices_buf_len = 0;
+    static char target_buf[55];
+    static uint16_t target_buf_len = 0;
+
+    switch (att_handle) {
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE:
+        if (offset == 0) {
+            devices_buf_len = build_seen_devices_listing(devices_buf, sizeof(devices_buf));
         }
-        return att_read_callback_handle_blob((uint8_t*)target_buf, len, offset, buffer, buffer_size);
+        return att_read_callback_handle_blob(devices_buf, devices_buf_len, offset, buffer, buffer_size);
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE:
+        if (offset == 0) {
+            if (target_device.valid) {
+                target_buf_len = (uint16_t)snprintf(target_buf, sizeof(target_buf), "%s,%u,%s", bd_addr_to_str(target_device.addr), target_device.addr_type, target_device.name);
+            } else {
+                target_buf[0] = '\0';
+                target_buf_len = 0;
+            }
+        }
+        return att_read_callback_handle_blob((uint8_t*)target_buf, target_buf_len, offset, buffer, buffer_size);
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF2_01_VALUE_HANDLE:
+        return att_read_callback_handle_blob((uint8_t*)"Macro ITM Device", 17, offset, buffer, buffer_size);
+    default:
+        return 0;
     }
     return 0;
 };
@@ -804,13 +840,15 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
 {
     if (transaction_mode != ATT_TRANSACTION_MODE_NONE || offset != 0) return 0;
 
-    if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE) {
+    switch (att_handle) {
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF0_01_VALUE_HANDLE:
         if (buffer_size == 5 && memcmp(buffer, "CLEAR", 5) == 0) {
             clear_seen_devices();
         } else {
             printf("Unknown command (expect CLEAR)\n");
         }
-    } else if (att_handle == ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE) {
+        break;
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF1_01_VALUE_HANDLE:
         if (buffer_size == 5 && memcmp(buffer, "CLEAR", 5) == 0) {
             clear_target_device();
         } else {
@@ -836,10 +874,53 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
             tlv_store_target_device(&target_device);
             printf("Target set to %s (type=%u)\n", bd_addr_to_str(temp_device.addr), temp_device.addr_type);
         }
-    } else {
+        break;
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF2_01_CLIENT_CONFIGURATION_HANDLE:
+        if (connection_handle != host_device.con_handle) {
+            printf("Ignoring client configuration write from non-host device\n");
+            break;
+        }
+        host_device.enabled_notifications = little_endian_read_16(buffer, 0) == GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION;
+        printf("Host log notifications %s\n", host_device.enabled_notifications ? "enabled" : "disabled");
+        break;
+    default:
         printf("Write to unknown handle %04X\n", att_handle);
+        break;
     }
     return 0;
+}
+
+static void att_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size)
+{
+    UNUSED(channel);
+    UNUSED(size);
+
+    printf("ATT event: %02X %02X\n", packet_type, hci_event_packet_get_type(packet));
+    if (packet_type != HCI_EVENT_PACKET)
+        return;
+
+    switch (hci_event_packet_get_type(packet)) {
+    case ATT_EVENT_CAN_SEND_NOW:
+        if (host_device.con_handle != HCI_CON_HANDLE_INVALID && !report_ring_buffer_is_empty(&debug_report_ring_buffer)) {
+            uint8_t buf[MAX_REPORT_LEN + 1];
+            uint8_t rid = 0;
+            int16_t len = report_ring_buffer_read(&debug_report_ring_buffer, &rid, buf + 1, MAX_REPORT_LEN);
+            if (len > 0) {
+                buf[0] = rid; // prefix ID
+                att_server_notify(host_device.con_handle,
+                                  ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF2_01_VALUE_HANDLE,
+                                  buf,
+                                  (uint16_t)(len + 1));
+            }
+            // request next if more pending
+            if (!report_ring_buffer_is_empty(&debug_report_ring_buffer)) {
+                att_server_request_can_send_now_event(host_device.con_handle);
+            }
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 int btstack_main(int argc, const char* argv[])
@@ -847,9 +928,9 @@ int btstack_main(int argc, const char* argv[])
     UNUSED(argc);
     UNUSED(argv);
 
-    /* Organized in a chronological manner of what is used and in what order */
     tlv_utils_init();
     report_ring_buffer_init(&hid_report_ring_buffer);
+    report_ring_buffer_init(&debug_report_ring_buffer);
 
     // setup transport layer
     l2cap_init();
@@ -859,11 +940,16 @@ int btstack_main(int argc, const char* argv[])
     sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
     sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING);
     sm_event_callback_registration.callback = &sm_packet_handler;
+    sm_add_event_handler(&sm_event_callback_registration);
 
     gatt_client_init();
 
     hids_client_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
+
+    // setup ATT server (read + write callbacks, packet handler for ATT_EVENT_CAN_SEND_NOW)
     att_server_init(profile_data, att_read_callback, att_write_callback);
+    att_server_register_packet_handler(&att_packet_handler);
+
     device_information_service_server_init();
 
     // setup HID Device service if descriptor is available
@@ -878,7 +964,7 @@ int btstack_main(int argc, const char* argv[])
         hids_device_init(0, hid_descriptor_keyboard_boot_mode, sizeof(hid_descriptor_keyboard_boot_mode));
     }
 
-    // setup discovery: advertisements
+    // setup advertisements
     uint16_t adv_int_min = 0x0030;
     uint16_t adv_int_max = 0x0030;
     uint8_t adv_type = 0;
@@ -887,16 +973,16 @@ int btstack_main(int argc, const char* argv[])
     gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
     gap_advertisements_set_data(config_adv_data_len, (uint8_t*)config_adv_data);
     gap_scan_response_set_data(scan_response_data_len, (uint8_t*)scan_response_data);
-    // Register for HCI events, main communication channel between btstack and
-    // application
+
+    // Register for HCI events, main communication channel between btstack and application
     hci_event_callback_registration.callback = &hci_packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
+
+    // Register for hids events from host
     hids_device_register_packet_handler(&hids_host_packet_handler);
-    sm_add_event_handler(&sm_event_callback_registration);
 
     // turn off stdout buffering to help with debugging (disable in prod tho)
     // setvbuf(stdin, NULL, _IONBF, 0);
-
 
     {
         target_device_t restored = tlv_load_target_device();

