@@ -91,6 +91,9 @@
         <option value="5000" selected>5s</option>
         <option value="10000">10s</option>
       </select>
+      <div id="autoDiscInfo" style="margin-top:.4rem; color:#555; font-size:.9rem; display:none;">
+        Auto discovery: refresh in <span id="autoDiscCountdown">5</span>s
+      </div>
     </div>
     <div id="targetSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
       <div style="font-weight:600; margin-bottom:.4rem;">Target</div>
@@ -122,6 +125,37 @@
     </table>
   </div>
 
+  <div id="macrosPanel" style="margin-top: 2rem;">
+    <h2>Macros</h2>
+    <p style="color:#555; margin-top:-.5rem;">Create simple input→output mappings. Each field holds a single HID report in hex (ID-first). Tip: click a Notification Log row to paste into the focused field.</p>
+
+    <table id="macrosTable">
+      <thead>
+        <tr>
+          <th style="width:3rem">#</th>
+          <th style="width:20%">Name</th>
+          <th>Input (match)</th>
+          <th>Output (replace)</th>
+          <th style="width:16rem">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="macrosTBody"></tbody>
+      <tfoot>
+        <tr>
+          <td>+</td>
+          <td><input id="newMacroName" placeholder="Name" style="width:100%" /></td>
+          <td><textarea id="macroIn" rows="1" style="width:100%; font-family:monospace; resize:none" placeholder="01 00 04 00 00 00 00 00"></textarea></td>
+          <td><textarea id="macroOut" rows="1" style="width:100%; font-family:monospace; resize:none" placeholder="01 00 05 00 00 00 00 00"></textarea></td>
+          <td>
+            <button id="addMacroBtn" disabled>Add</button>
+            <button id="clearCreatorBtn">Clear</button>
+            <div id="macroError" style="color:#b00020; font-size:.85rem; margin-top:.25rem"></div>
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
   <script>
     (() => {
   const SERVICE_UUID = '12345678-90ab-cdef-0123-456789abcdef';
@@ -131,7 +165,9 @@
 
   let device, server, service, listChar, targetChar, logChar;
   let logSubscribed = false;
-      let autoTimer = null;
+    // Auto discovery countdown timer state
+    let autoTickTimer = null;
+    let countdownSec = 0;
 
       const qs = id => document.getElementById(id);
       const statusEl = qs('status');
@@ -144,10 +180,27 @@
   const latestKeysEl = document.getElementById('latestKeys');
   const pressedKeysEl = document.getElementById('pressedKeys');
   const notifyTableBody = document.getElementById('notifyTableBody');
+  // Macros UI refs
+  const macrosTBody = document.getElementById('macrosTBody');
+  const newMacroNameEl = document.getElementById('newMacroName');
+  const macroInEl = document.getElementById('macroIn');
+  const macroOutEl = document.getElementById('macroOut');
+  const addMacroBtn = document.getElementById('addMacroBtn');
+  const clearCreatorBtn = document.getElementById('clearCreatorBtn');
+  const macroErrorEl = document.getElementById('macroError');
+      const autoRefreshChk = document.getElementById('autoRefresh');
+      const intervalSel = document.getElementById('intervalSel');
+      const autoDiscInfo = document.getElementById('autoDiscInfo');
+      const autoDiscCountdown = document.getElementById('autoDiscCountdown');
 
   /** @type {Set<number>} */
   const pressedSet = new Set();
   const MAX_ROWS = 50;
+  const LS_KEY = 'mitm_macro_pairs_v1';
+  /** @type {{name:string,inHex:string,outHex:string}[]} */
+  let macros = [];
+  // Track table edit state: -1 for none, otherwise index being edited
+  let editingIndex = -1;
 
       function setStatus(msg) {
         statusEl.textContent = msg;
@@ -158,7 +211,7 @@
         connState.textContent = connected ? 'Connected' : 'Disconnected';
         qs('refreshBtn').disabled = !connected;
         qs('clearBtn').disabled = !connected;
-        qs('intervalSel').disabled = !connected || !qs('autoRefresh').checked;
+  intervalSel.disabled = !connected || !autoRefreshChk.checked;
         clearTargetBtn.disabled = !connected;
         subscribeBtn.disabled = !connected;
         subscribeBtn.textContent = logSubscribed ? 'Unsubscribe' : 'Subscribe';
@@ -198,6 +251,8 @@
           setStatus('Connected.');
           enableControls(true);
           await refresh();
+          // Auto behaviors: subscribe to notifications and start auto refresh if no target
+          ensureAutoBehaviors();
         } catch (e) {
           setStatus('Error: ' + e);
           console.error(e);
@@ -207,7 +262,7 @@
       function onDisconnected() {
         setStatus('Disconnected.');
         enableControls(false);
-        stopAuto();
+  stopAuto();
         // cleanup subscription state
         if (logChar && logSubscribed) {
           try { logChar.stopNotifications(); } catch (e) {}
@@ -332,16 +387,52 @@
         }
       }
 
+      function getIntervalSec() {
+        const ms = parseInt(intervalSel.value, 10);
+        return Math.max(1, Math.floor(ms / 1000));
+      }
+
+      function resetCountdown() {
+        countdownSec = getIntervalSec();
+        autoDiscCountdown.textContent = String(countdownSec);
+      }
+
       function startAuto() {
         stopAuto();
-        qs('intervalSel').disabled = false;
-        autoTimer = setInterval(refresh, parseInt(qs('intervalSel').value, 10));
+        intervalSel.disabled = false;
+        resetCountdown();
+        autoTickTimer = setInterval(async () => {
+          countdownSec -= 1;
+          if (countdownSec <= 0) {
+            await refresh();
+            resetCountdown();
+          }
+          autoDiscCountdown.textContent = String(countdownSec);
+        }, 1000);
       }
 
       function stopAuto() {
-        qs('intervalSel').disabled = true;
-        if (autoTimer) clearInterval(autoTimer);
-        autoTimer = null;
+        intervalSel.disabled = true;
+        if (autoTickTimer) clearInterval(autoTickTimer);
+        autoTickTimer = null;
+      }
+
+      function ensureAutoBehaviors() {
+        // Auto-subscribe to notifications after connect if not already
+        if (!logSubscribed && logChar) {
+          toggleSubscribe().catch(() => {});
+        }
+        // Auto-refresh devices when no target is selected
+        const hasTarget = (targetValEl.textContent && targetValEl.textContent !== '(none)');
+        if (!hasTarget) {
+          if (!autoTickTimer) {
+            autoRefreshChk.checked = true;
+            startAuto();
+          }
+          autoDiscInfo.style.display = '';
+        } else {
+          autoDiscInfo.style.display = 'none';
+        }
       }
 
       function bufferToHex(view) {
@@ -390,12 +481,16 @@
           keys: keysForLog,
           hex
         });
+
       }
 
       function addNotifyRow(rec) {
         const tr = document.createElement('tr');
         const t = rec.time.toLocaleTimeString();
         tr.innerHTML = `<td>${t}</td><td>${rec.id}</td><td>${escapeHtml(rec.mods)}</td><td>${escapeHtml(rec.keys)}</td><td class="mac">${escapeHtml(rec.hex)}</td>`;
+        tr.style.cursor = 'pointer';
+        tr.title = 'Click to paste raw hex into the focused macro field';
+        tr.addEventListener('click', () => pasteHexToActive(rec.hex));
         notifyTableBody.insertBefore(tr, notifyTableBody.firstChild);
         while (notifyTableBody.rows.length > MAX_ROWS) {
           notifyTableBody.deleteRow(notifyTableBody.rows.length - 1);
@@ -486,6 +581,171 @@
         return (downStr || upStr) ? [downStr, upStr].filter(Boolean).join(' | ') : '(no change)';
       }
 
+      // ===== Macros logic =====
+      function loadMacros() {
+        try {
+          const raw = localStorage.getItem(LS_KEY);
+          const parsed = raw ? JSON.parse(raw) : [];
+          // Migrate old schema {inHex,outHex} -> add name
+          macros = Array.isArray(parsed) ? parsed.map(m => ({
+            name: typeof m.name === 'string' ? m.name : '',
+            inHex: m.inHex || '',
+            outHex: m.outHex || ''
+          })) : [];
+        } catch (_) {
+          macros = [];
+        }
+        renderMacrosTable();
+      }
+
+      function saveMacros() {
+        localStorage.setItem(LS_KEY, JSON.stringify(macros));
+      }
+
+      function normalizeHex(text) {
+        return text.trim().replace(/\s+/g, ' ').toUpperCase();
+      }
+      function renderMacrosTable() {
+        macrosTBody.innerHTML = '';
+        macros.forEach((m, idx) => {
+          const tr = document.createElement('tr');
+          if (editingIndex === idx) {
+            tr.innerHTML = `
+              <td>${idx + 1}</td>
+              <td><input class="edit-name" value="${escapeHtml(m.name || '')}" style="width:100%" /></td>
+              <td><textarea class="edit-in" rows="1" style="width:100%; font-family:monospace; resize:none" data-role="macro-in">${escapeHtml(m.inHex)}</textarea></td>
+              <td><textarea class="edit-out" rows="1" style="width:100%; font-family:monospace; resize:none" data-role="macro-out">${escapeHtml(m.outHex)}</textarea></td>
+              <td>
+                <button class="save">Save</button>
+                <button class="cancel">Cancel</button>
+                <span class="rowErr" style="color:#b00020; margin-left:.5rem"></span>
+              </td>`;
+            const nameI = tr.querySelector('.edit-name');
+            const inTA = tr.querySelector('.edit-in');
+            const outTA = tr.querySelector('.edit-out');
+            const rowErr = tr.querySelector('.rowErr');
+            const doValidate = () => { rowErr.textContent = validatePair(nameI.value, inTA.value, outTA.value) || ''; };
+            nameI.addEventListener('input', doValidate);
+            inTA.addEventListener('input', doValidate);
+            outTA.addEventListener('input', doValidate);
+            inTA.addEventListener('focus', () => {});
+            outTA.addEventListener('focus', () => {});
+            tr.querySelector('.save').addEventListener('click', () => {
+              const err = validatePair(nameI.value, inTA.value, outTA.value);
+              if (err) {
+                rowErr.textContent = err;
+                return;
+              }
+              m.name = (nameI.value || '').trim();
+              m.inHex = normalizeHex(inTA.value);
+              m.outHex = normalizeHex(outTA.value);
+              editingIndex = -1;
+              saveMacros();
+              renderMacrosTable();
+            });
+            tr.querySelector('.cancel').addEventListener('click', () => {
+              editingIndex = -1;
+              renderMacrosTable();
+            });
+          } else {
+            tr.innerHTML = `
+              <td>${idx + 1}</td>
+              <td>${escapeHtml(m.name || '')}</td>
+              <td><div style="font-family:monospace">${escapeHtml(m.inHex)}</div></td>
+              <td><div style="font-family:monospace">${escapeHtml(m.outHex)}</div></td>
+              <td>
+                <button class="up">Up</button>
+                <button class="down">Down</button>
+                <button class="edit">Edit</button>
+                <button class="del">Delete</button>
+              </td>`;
+            tr.querySelector('.up').addEventListener('click', () => moveMacro(idx, -1));
+            tr.querySelector('.down').addEventListener('click', () => moveMacro(idx, +1));
+            tr.querySelector('.edit').addEventListener('click', () => { editingIndex = idx; renderMacrosTable(); });
+            tr.querySelector('.del').addEventListener('click', () => deleteMacro(idx));
+          }
+          macrosTBody.appendChild(tr);
+        });
+      }
+
+      function moveMacro(idx, delta) {
+        const j = idx + delta;
+        if (j < 0 || j >= macros.length) return;
+        const tmp = macros[idx];
+        macros[idx] = macros[j];
+        macros[j] = tmp;
+        saveMacros();
+        renderMacrosTable();
+      }
+
+      function deleteMacro(idx) {
+        macros.splice(idx, 1);
+        saveMacros();
+        renderMacrosTable();
+      }
+
+      function clearCreator() {
+        newMacroNameEl.value = '';
+        macroInEl.value = '';
+        macroOutEl.value = '';
+        macroErrorEl.textContent = '';
+        updateCreatorControls();
+      }
+
+      function parseHexToArray(text) {
+        const t = normalizeHex(text);
+        if (!t) return [];
+        if (!/^([0-9A-F]{2})( [0-9A-F]{2})*$/.test(t)) return null;
+        return t.split(' ').map(x => parseInt(x, 16));
+      }
+
+      function validatePair(name, inText, outText) {
+        const a = parseHexToArray(inText);
+        const b = parseHexToArray(outText);
+        if (a === null) return 'Input must be hex bytes (e.g., "01 00 04 00 ...")';
+        if (b === null) return 'Output must be hex bytes';
+        if (!a || !b || a.length === 0 || b.length === 0) return 'Both input and output are required';
+        if (a.length !== b.length) return 'Input and output must be the same length';
+        if (normalizeHex(inText) === normalizeHex(outText)) return 'Input and output cannot be identical';
+        return '';
+      }
+
+      function updateCreatorControls() {
+        const err = validatePair(newMacroNameEl.value, macroInEl.value, macroOutEl.value);
+        macroErrorEl.textContent = err || '';
+        addMacroBtn.disabled = !!err;
+      }
+
+      function addMacro() {
+        const err = validatePair(newMacroNameEl.value, macroInEl.value, macroOutEl.value);
+        if (err) { macroErrorEl.textContent = err; return; }
+        const name = (newMacroNameEl.value || '').trim();
+        const inHex = normalizeHex(macroInEl.value);
+        const outHex = normalizeHex(macroOutEl.value);
+        macros.push({ name, inHex, outHex });
+        saveMacros();
+        renderMacrosTable();
+        clearCreator();
+      }
+
+      function pasteHexToActive(hex) {
+        const norm = normalizeHex(hex);
+        const ae = document.activeElement;
+        if (ae && (ae.getAttribute('data-role') === 'macro-in' || ae.getAttribute('data-role') === 'macro-out' || ae.classList.contains('edit-in') || ae.classList.contains('edit-out'))) {
+          ae.value = norm;
+          // Trigger validation if in creator
+          if (ae === macroInEl || ae === macroOutEl) updateCreatorControls();
+          return;
+        }
+        // Fallback: paste into creator input
+        macroInEl.value = norm;
+        updateCreatorControls();
+      }
+
+      // Mark creator fields for paste targeting
+      macroInEl.setAttribute('data-role', 'macro-in');
+      macroOutEl.setAttribute('data-role', 'macro-out');
+
       async function toggleSubscribe() {
         if (!server || !server.connected) {
           setStatus('Not connected.');
@@ -521,13 +781,30 @@
       qs('refreshBtn').addEventListener('click', refresh);
       qs('clearBtn').addEventListener('click', clearDevices);
       qs('subscribeBtn').addEventListener('click', toggleSubscribe);
-      qs('autoRefresh').addEventListener('change', e => {
-        if (e.target.checked) startAuto(); else stopAuto();
+      autoRefreshChk.addEventListener('change', e => {
+        if (e.target.checked) {
+          startAuto();
+        } else {
+          stopAuto();
+        }
       });
-      qs('intervalSel').addEventListener('change', () => {
-        if (qs('autoRefresh').checked) startAuto();
+      intervalSel.addEventListener('change', () => {
+        if (autoRefreshChk.checked) {
+          resetCountdown();
+        }
       });
       clearTargetBtn.addEventListener('click', clearTarget);
+
+      // Macros events
+  addMacroBtn.addEventListener('click', addMacro);
+  clearCreatorBtn.addEventListener('click', clearCreator);
+  newMacroNameEl.addEventListener('input', updateCreatorControls);
+  macroInEl.addEventListener('input', updateCreatorControls);
+  macroOutEl.addEventListener('input', updateCreatorControls);
+
+      loadMacros();
+      // Initialize creator controls
+      updateCreatorControls();
 
       enableControls(false);
     })();
