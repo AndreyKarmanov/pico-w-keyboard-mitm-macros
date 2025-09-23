@@ -9,6 +9,9 @@
 #define TLV_TAG_TARGET_DEVICE 0x54524754u
 // TLV tag for HID descriptor ('HIDD')
 #define TLV_TAG_HID_DESCRIPTOR 0x48494444u
+// TLV tag for Macros text ('MACR') and binary ('MBIN')
+#define TLV_TAG_MACROS_TEXT 0x4D414352u
+#define TLV_TAG_MACROS_BIN  0x4D42494Eu
 
 static const btstack_tlv_t* tlv_impl;
 static void* tlv_context;
@@ -88,4 +91,22 @@ void tlv_save_target_if_needed(const target_device_t* current) {
     }
     printf("Persisted target differs, replacing\n");
     tlv_store_target_device(current);
+}
+
+// Legacy text tag constant retained but functions removed per request.
+
+uint16_t tlv_load_macros_bin(uint8_t* buffer, uint16_t buffer_size) {
+    if (!tlv_impl) return 0;
+    int len = tlv_impl->get_tag(tlv_context, TLV_TAG_MACROS_BIN, buffer, buffer_size);
+    if (len > 0) {
+        printf("Loaded Macros BIN from TLV (len=%u)\n", len);
+        return (uint16_t)len;
+    }
+    return 0;
+}
+
+void tlv_store_macros_bin(const uint8_t* buffer, uint16_t buffer_size) {
+    if (!tlv_impl || buffer == NULL) return;
+    tlv_impl->store_tag(tlv_context, TLV_TAG_MACROS_BIN, buffer, buffer_size);
+    printf("Stored Macros BIN in TLV (len=%u)\n", buffer_size);
 }

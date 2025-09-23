@@ -77,6 +77,7 @@
     <div id="connSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
       <div style="font-weight:600; margin-bottom:.4rem;">Connection</div>
       <button id="connectBtn">Connect</button>
+      <button id="disconnectBtn" disabled>Disconnect</button>
       <div id="connState" style="display:inline-block; margin-left:.5rem; color:#555; font-size:.9rem;">Disconnected</div>
     </div>
     <div id="discSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
@@ -128,7 +129,12 @@
   <div id="macrosPanel" style="margin-top: 2rem;">
     <h2>Macros</h2>
     <p style="color:#555; margin-top:-.5rem;">Create simple input→output mappings. Each field holds a single HID report in hex (ID-first). Tip: click a Notification Log row to paste into the focused field.</p>
-
+    <div style="margin:.5rem 0; display:flex; gap:.5rem; flex-wrap:wrap; align-items:center;">
+      <button id="downloadMacrosBtn" disabled>Download from Device</button>
+      <button id="uploadMacrosBtn" disabled>Upload to Device</button>
+      <button id="clearDeviceMacrosBtn" disabled>Clear on Device</button>
+      <span id="macrosSyncStatus" style="color:#555; font-size:.9rem;"></span>
+    </div>
     <table id="macrosTable">
       <thead>
         <tr>
@@ -144,8 +150,8 @@
         <tr>
           <td>+</td>
           <td><input id="newMacroName" placeholder="Name" style="width:100%" /></td>
-          <td><textarea id="macroIn" rows="1" style="width:100%; font-family:monospace; resize:none" placeholder="01 00 04 00 00 00 00 00"></textarea></td>
-          <td><textarea id="macroOut" rows="1" style="width:100%; font-family:monospace; resize:none" placeholder="01 00 05 00 00 00 00 00"></textarea></td>
+          <td><textarea id="macroIn" rows="2" style="width:100%; font-family:monospace; resize:vertical" placeholder="01 00 04 00 00 00 00 00"></textarea></td>
+          <td><textarea id="macroOut" rows="2" style="width:100%; font-family:monospace; resize:vertical" placeholder="01 00 05 00 00 00 00 00"></textarea></td>
           <td>
             <button id="addMacroBtn" disabled>Add</button>
             <button id="clearCreatorBtn">Clear</button>
@@ -162,8 +168,9 @@
   const LIST_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf0';
   const TARGET_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf1';
   const LOG_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf2';
+  const MACROS_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf3';
 
-  let device, server, service, listChar, targetChar, logChar;
+  let device, server, service, listChar, targetChar, logChar, macrosChar;
   let logSubscribed = false;
     // Auto discovery countdown timer state
     let autoTickTimer = null;
@@ -180,6 +187,7 @@
   const latestKeysEl = document.getElementById('latestKeys');
   const pressedKeysEl = document.getElementById('pressedKeys');
   const notifyTableBody = document.getElementById('notifyTableBody');
+  const disconnectBtn = document.getElementById('disconnectBtn');
   // Macros UI refs
   const macrosTBody = document.getElementById('macrosTBody');
   const newMacroNameEl = document.getElementById('newMacroName');
@@ -188,6 +196,10 @@
   const addMacroBtn = document.getElementById('addMacroBtn');
   const clearCreatorBtn = document.getElementById('clearCreatorBtn');
   const macroErrorEl = document.getElementById('macroError');
+  const downloadMacrosBtn = document.getElementById('downloadMacrosBtn');
+  const uploadMacrosBtn = document.getElementById('uploadMacrosBtn');
+  const clearDeviceMacrosBtn = document.getElementById('clearDeviceMacrosBtn');
+  const macrosSyncStatus = document.getElementById('macrosSyncStatus');
       const autoRefreshChk = document.getElementById('autoRefresh');
       const intervalSel = document.getElementById('intervalSel');
       const autoDiscInfo = document.getElementById('autoDiscInfo');
@@ -216,6 +228,11 @@
         subscribeBtn.disabled = !connected;
         subscribeBtn.textContent = logSubscribed ? 'Unsubscribe' : 'Subscribe';
         notifyStatus.textContent = logSubscribed ? 'Subscribed' : 'Not subscribed';
+        disconnectBtn.disabled = !connected;
+        // macros sync controls
+        downloadMacrosBtn.disabled = !connected;
+        uploadMacrosBtn.disabled = !connected;
+        clearDeviceMacrosBtn.disabled = !connected;
       }
 
       async function connect() {
@@ -243,10 +260,11 @@
           server = await device.gatt.connect();
           setStatus('Getting service...');
           service = await server.getPrimaryService(SERVICE_UUID);
-          [listChar, targetChar, logChar] = await Promise.all([
+          [listChar, targetChar, logChar, macrosChar] = await Promise.all([
             service.getCharacteristic(LIST_CHAR_UUID),
             service.getCharacteristic(TARGET_CHAR_UUID),
-            service.getCharacteristic(LOG_CHAR_UUID)
+            service.getCharacteristic(LOG_CHAR_UUID),
+            service.getCharacteristic(MACROS_CHAR_UUID)
           ]);
           setStatus('Connected.');
           enableControls(true);
@@ -270,6 +288,14 @@
         logSubscribed = false;
         logChar = null;
         notifyStatus.textContent = 'Not subscribed';
+      }
+
+      async function disconnect() {
+        try {
+          if (device && device.gatt.connected) {
+            await device.gatt.disconnect();
+          }
+        } catch (_) {}
       }
 
       function parseListing(text) {
@@ -602,6 +628,65 @@
         localStorage.setItem(LS_KEY, JSON.stringify(macros));
       }
 
+      function hexToBytes(hex) {
+        const n = normalizeHex(hex);
+        if (!n) return new Uint8Array(0);
+        const parts = n.split(' ');
+        return new Uint8Array(parts.map(p => parseInt(p, 16)));
+      }
+
+      function bytesToHex(bytes) {
+        return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
+      }
+
+      function macrosToBinary() {
+        // Compute size
+        let size = 6; // magic + ver + count
+        const inArrs = []; const outArrs = []; const nameBytes = [];
+        for (const m of macros) {
+          const inB = hexToBytes(m.inHex);
+          const outB = hexToBytes(m.outHex);
+          const nm = (m.name || '').trim();
+          const nb = new TextEncoder().encode(nm);
+          inArrs.push(inB); outArrs.push(outB); nameBytes.push(nb);
+          size += 2 + nb.length + inB.length + outB.length;
+        }
+        const buf = new Uint8Array(size);
+        let p = 0;
+        buf[p++] = 'M'.charCodeAt(0); buf[p++] = 'B'.charCodeAt(0); buf[p++] = 'I'.charCodeAt(0); buf[p++] = 'N'.charCodeAt(0);
+        buf[p++] = 1; // version
+        buf[p++] = macros.length & 0xFF;
+        for (let i = 0; i < macros.length; i++) {
+          const nb = nameBytes[i]; const inB = inArrs[i]; const outB = outArrs[i];
+          buf[p++] = nb.length & 0xFF;
+          buf[p++] = inB.length & 0xFF; // len
+          buf.set(nb, p); p += nb.length;
+          buf.set(inB, p); p += inB.length;
+          buf.set(outB, p); p += outB.length;
+        }
+        return buf;
+      }
+
+      function binaryToMacros(buf) {
+        const a = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+        if (a.length < 6) return [];
+        if (!(a[0]===77 && a[1]===66 && a[2]===73 && a[3]===78)) return [];
+        if (a[4] !== 1) return [];
+        const count = a[5];
+        let p = 6; const out = [];
+        for (let i = 0; i < count; i++) {
+          if (p + 2 > a.length) break;
+          const nameLen = a[p++];
+          const len = a[p++];
+          if (len === 0 || p + nameLen + len + len > a.length) break;
+          const name = new TextDecoder().decode(a.slice(p, p + nameLen)); p += nameLen;
+          const inB = a.slice(p, p + len); p += len;
+          const outB = a.slice(p, p + len); p += len;
+          out.push({ name, inHex: bytesToHex(inB), outHex: bytesToHex(outB) });
+        }
+        return out;
+      }
+
       function normalizeHex(text) {
         return text.trim().replace(/\s+/g, ' ').toUpperCase();
       }
@@ -728,6 +813,50 @@
         clearCreator();
       }
 
+      async function downloadMacros() {
+        if (!macrosChar) return;
+        macrosSyncStatus.textContent = 'Downloading...';
+        try {
+          const v = await macrosChar.readValue();
+          macros = binaryToMacros(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+          saveMacros();
+          renderMacrosTable();
+          macrosSyncStatus.textContent = `Downloaded ${macros.length} macros.`;
+        } catch (e) {
+          macrosSyncStatus.textContent = `Download failed: ${e}`;
+        }
+      }
+
+      async function uploadMacros() {
+        if (!macrosChar) return;
+        const bin = macrosToBinary();
+        const enc = new TextEncoder();
+        macrosSyncStatus.textContent = 'Uploading...';
+        try {
+          await macrosChar.writeValueWithoutResponse(enc.encode('BEGIN'));
+          const CH = 180;
+          for (let i = 0; i < bin.length; i += CH) {
+            await macrosChar.writeValueWithoutResponse(bin.slice(i, i + CH));
+          }
+          await macrosChar.writeValueWithoutResponse(enc.encode('COMMIT'));
+          macrosSyncStatus.textContent = `Uploaded ${macros.length} macros.`;
+        } catch (e) {
+          macrosSyncStatus.textContent = `Upload failed: ${e}`;
+        }
+      }
+
+      async function clearDeviceMacros() {
+        if (!macrosChar) return;
+        const enc = new TextEncoder();
+        macrosSyncStatus.textContent = 'Clearing on device...';
+        try {
+          await macrosChar.writeValueWithoutResponse(enc.encode('CLEAR'));
+          macrosSyncStatus.textContent = 'Cleared macros on device.';
+        } catch (e) {
+          macrosSyncStatus.textContent = `Clear failed: ${e}`;
+        }
+      }
+
       function pasteHexToActive(hex) {
         const norm = normalizeHex(hex);
         const ae = document.activeElement;
@@ -737,8 +866,12 @@
           if (ae === macroInEl || ae === macroOutEl) updateCreatorControls();
           return;
         }
-        // Fallback: paste into creator input
-        macroInEl.value = norm;
+        // Fallback: paste into the creator's currently focused field; if none, input
+        if (document.activeElement === macroOutEl) {
+          macroOutEl.value = norm;
+        } else {
+          macroInEl.value = norm;
+        }
         updateCreatorControls();
       }
 
@@ -778,6 +911,7 @@
 
       // Event bindings
       qs('connectBtn').addEventListener('click', connect);
+  disconnectBtn.addEventListener('click', disconnect);
       qs('refreshBtn').addEventListener('click', refresh);
       qs('clearBtn').addEventListener('click', clearDevices);
       qs('subscribeBtn').addEventListener('click', toggleSubscribe);
@@ -794,6 +928,9 @@
         }
       });
       clearTargetBtn.addEventListener('click', clearTarget);
+  downloadMacrosBtn.addEventListener('click', downloadMacros);
+  uploadMacrosBtn.addEventListener('click', uploadMacros);
+  clearDeviceMacrosBtn.addEventListener('click', clearDeviceMacros);
 
       // Macros events
   addMacroBtn.addEventListener('click', addMacro);

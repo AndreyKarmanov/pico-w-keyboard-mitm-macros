@@ -22,4 +22,10 @@ void tlv_save_target_if_needed(const target_device_t* current);
 uint16_t tlv_load_hid_descriptor(uint8_t* buffer, uint16_t buffer_size);
 void tlv_store_hid_descriptor(const uint8_t* buffer, uint16_t buffer_size);
 
+// Macros (binary) persistence helpers. The stored blob is what the config page uploads.
+// See macro_itm.c for the exact binary layout (magic 'MBIN', version, count, entries).
+uint16_t tlv_load_macros_bin(uint8_t* buffer, uint16_t buffer_size);
+void tlv_store_macros_bin(const uint8_t* buffer, uint16_t buffer_size);
+
+
 #endif // TLV_UTILS_H

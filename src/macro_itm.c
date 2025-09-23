@@ -67,6 +67,25 @@ static host_device_t host_device = { 0, {0}, HCI_CON_HANDLE_INVALID, 0, 0, false
 static report_ring_buffer_t hid_report_ring_buffer;
 static report_ring_buffer_t debug_report_ring_buffer;
 
+// --- Macros storage and runtime ---
+// Each macro: optional name, input bytes (ID-first), output bytes (ID-first)
+typedef struct {
+    char name[32];
+    uint8_t in[MAX_REPORT_LEN + 1];
+    uint8_t out[MAX_REPORT_LEN + 1];
+    uint8_t len; // includes ID as first byte
+} macro_rule_t;
+
+#define MAX_MACROS 32
+static macro_rule_t macro_rules[MAX_MACROS];
+static uint8_t macro_rules_count = 0;
+static bool macros_dirty = false;
+
+// Buffer for chunked binary upload via ATT
+#define MACROS_BIN_MAX 1400
+static uint8_t macros_bin_buf[MACROS_BIN_MAX];
+static uint16_t macros_bin_len = 0;
+
 static uint16_t hids_cid;
 static uint8_t hid_descriptor_storage[500];
 
@@ -374,6 +393,76 @@ static void clear_seen_devices()
     printf("Seen devices cleared\n");
 }
 
+static void macros_clear_all(){
+    memset(macro_rules, 0, sizeof(macro_rules));
+    macro_rules_count = 0;
+}
+// Binary format:
+//  magic[4] = 'MBIN' (0x4D 0x42 0x49 0x4E)
+//  version[1] = 1
+//  count[1]
+//  entries[count]:
+//    name_len[1], len[1]  (len = total bytes incl. ID)
+//    name[name_len]       (not NUL-terminated)
+//    in[len]
+//    out[len]
+
+static bool macros_parse_bin_and_load(const uint8_t* data, uint16_t len){
+    if (len < 6) { macros_clear_all(); return false; }
+    if (!(data[0]=='M' && data[1]=='B' && data[2]=='I' && data[3]=='N')) { macros_clear_all(); return false; }
+    if (data[4] != 1) { macros_clear_all(); return false; }
+    uint8_t count = data[5];
+    uint16_t pos = 6;
+    macros_clear_all();
+    for (uint8_t i = 0; i < count && i < MAX_MACROS; i++){
+        if (pos + 2 > len) break;
+        uint8_t name_len = data[pos++];
+        uint8_t rlen = data[pos++];
+        if (rlen == 0 || rlen > (MAX_REPORT_LEN+1)) { macros_clear_all(); return false; }
+        if (pos + name_len + rlen + rlen > len) { macros_clear_all(); return false; }
+        macro_rule_t r = (macro_rule_t){0};
+        if (name_len){
+            uint8_t cpy = name_len < sizeof(r.name)-1 ? name_len : (uint8_t)(sizeof(r.name)-1);
+            memcpy(r.name, data+pos, cpy);
+        }
+        pos += name_len;
+        memcpy(r.in, data+pos, rlen); pos += rlen;
+        memcpy(r.out, data+pos, rlen); pos += rlen;
+        r.len = rlen;
+        macro_rules[macro_rules_count++] = r;
+    }
+    printf("Loaded %u macro rules (BIN)\n", macro_rules_count);
+    return true;
+}
+
+static uint16_t macros_dump_bin(uint8_t* out, uint16_t max_len){
+    uint16_t pos = 0;
+    if (max_len < 6) return 0;
+    out[pos++] = 'M'; out[pos++] = 'B'; out[pos++] = 'I'; out[pos++] = 'N';
+    out[pos++] = 1; // version
+    out[pos++] = macro_rules_count;
+    for (uint8_t i = 0; i < macro_rules_count; i++){
+        macro_rule_t* r = &macro_rules[i];
+        uint8_t name_len = (uint8_t)strnlen(r->name, sizeof(r->name));
+        if (pos + 2 + name_len + r->len + r->len > max_len) break;
+        out[pos++] = name_len;
+        out[pos++] = r->len;
+        if (name_len){ memcpy(out+pos, r->name, name_len); pos += name_len; }
+        memcpy(out+pos, r->in, r->len); pos += r->len;
+        memcpy(out+pos, r->out, r->len); pos += r->len;
+    }
+    return pos;
+}
+
+static void macros_load_from_tlv(){
+    uint8_t buf[MACROS_BIN_MAX];
+    uint16_t len = tlv_load_macros_bin(buf, sizeof(buf));
+    if (len > 0 && macros_parse_bin_and_load(buf, len)) {
+        return;
+    }
+    macros_clear_all();
+}
+
 static uint16_t build_seen_devices_listing(uint8_t* out, uint16_t max_len)
 {
     uint16_t pos = 0;
@@ -605,17 +694,33 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
         if (host_device.con_handle == HCI_CON_HANDLE_INVALID)
             break;
 
+        // Apply macros if any: exact match on full bytes including ID as first byte
+        const uint8_t* out_bytes = report_with_id;
+        uint16_t out_len = report_len_with_id;
+        uint8_t out_report_id = report_id;
+        for (uint8_t i = 0; i < macro_rules_count; i++){
+            macro_rule_t* r = &macro_rules[i];
+            if (r->len == report_len_with_id && memcmp(report_with_id, r->in, r->len) == 0){
+                out_bytes = r->out;
+                out_len = r->len;
+                if (report_id > 0 && out_len >= 1){
+                    out_report_id = out_bytes[0];
+                }
+                break; // first-match wins
+            }
+        }
 
-        if (host_device.subscribed_reports_bitmap & (1u << report_id)) {
-            const uint8_t* report_data = report_with_id;
-            uint16_t report_len = report_len_with_id;
 
-            if (report_id > 0) {
-                report_data = report_with_id + 1;
-                report_len = report_len_with_id - 1;
+        if (host_device.subscribed_reports_bitmap & (1u << out_report_id)) {
+            const uint8_t* report_data = out_bytes;
+            uint16_t report_len = out_len;
+
+            if (out_report_id > 0) {
+                report_data = out_bytes + 1;
+                report_len = out_len - 1;
             }
 
-            if (report_ring_buffer_write(&hid_report_ring_buffer, report_id, report_data, report_len)) {
+            if (report_ring_buffer_write(&hid_report_ring_buffer, out_report_id, report_data, report_len)) {
                 hids_device_request_can_send_now_event(host_device.con_handle);
             } else {
                 printf("Failed to write HID report to ring buffer; it might be full.\n");
@@ -624,18 +729,18 @@ static void hids_client_packet_handler(uint8_t packet_type, uint16_t channel, ui
 
         if (host_device.enabled_notifications && host_device.con_handle != HCI_CON_HANDLE_INVALID) {
             // Push into debug ring buffer as (id, payload)
-            const uint8_t* payload = report_with_id;
-            uint16_t payload_len = report_len_with_id;
-            if (report_id > 0) {
-                // report_with_id starts with ID byte when ID>0; exclude it for payload
-                payload = report_with_id + 1;
-                payload_len = report_len_with_id - 1;
+            const uint8_t* payload = out_bytes;
+            uint16_t payload_len = out_len;
+            if (out_report_id > 0) {
+                // exclude ID
+                payload = out_bytes + 1;
+                payload_len = out_len - 1;
             }
             if (payload_len > MAX_REPORT_LEN) payload_len = MAX_REPORT_LEN;
-            if (report_ring_buffer_write(&debug_report_ring_buffer, report_id, payload, (uint8_t)payload_len)) {
+            if (report_ring_buffer_write(&debug_report_ring_buffer, out_report_id, payload, (uint8_t)payload_len)) {
                 att_server_request_can_send_now_event(host_device.con_handle);
             } else {
-                printf("Debug notify ring full, dropping report id=%u len=%u\n", report_id, payload_len);
+                printf("Debug notify ring full, dropping report id=%u len=%u\n", out_report_id, payload_len);
             }
         }
 
@@ -830,6 +935,15 @@ static uint16_t att_read_callback(hci_con_handle_t connection_handle, uint16_t a
         return att_read_callback_handle_blob((uint8_t*)target_buf, target_buf_len, offset, buffer, buffer_size);
     case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF2_01_VALUE_HANDLE:
         return att_read_callback_handle_blob((uint8_t*)"Macro ITM Device", 17, offset, buffer, buffer_size);
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF3_01_VALUE_HANDLE: {
+        // Dump macros as binary blob
+        static uint8_t dump[MACROS_BIN_MAX];
+        static uint16_t dump_len = 0;
+        if (offset == 0){
+            dump_len = macros_dump_bin(dump, sizeof(dump));
+        }
+        return att_read_callback_handle_blob(dump, dump_len, offset, buffer, buffer_size);
+    }
     default:
         return 0;
     }
@@ -883,6 +997,45 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
         host_device.enabled_notifications = little_endian_read_16(buffer, 0) == GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION;
         printf("Host log notifications %s\n", host_device.enabled_notifications ? "enabled" : "disabled");
         break;
+    case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF3_01_VALUE_HANDLE: {
+        // Accept simple commands or append binary data
+        // Commands:
+        //   CLEAR   - clear macros
+        //   COMMIT  - parse buffered BIN and store to TLV
+        //   BEGIN   - reset buffer for chunked upload
+        if (buffer_size == 5 && memcmp(buffer, "CLEAR", 5) == 0) {
+            macros_clear_all();
+            macros_bin_len = 0;
+            tlv_store_macros_bin((const uint8_t*)"", 0);
+            printf("Macros cleared\n");
+        } else if (buffer_size == 5 && memcmp(buffer, "BEGIN", 5) == 0) {
+            macros_bin_len = 0;
+            printf("Macros upload BEGIN (BIN)\n");
+        } else if (buffer_size == 6 && memcmp(buffer, "COMMIT", 6) == 0) {
+            if (macros_bin_len > 0) {
+                bool ok = macros_parse_bin_and_load(macros_bin_buf, macros_bin_len);
+                if (ok) {
+                    tlv_store_macros_bin(macros_bin_buf, macros_bin_len);
+                    macros_dirty = false;
+                    printf("Macros COMMIT (BIN): %u bytes, %u rules\n", macros_bin_len, macro_rules_count);
+                } else {
+                    printf("Macros COMMIT (BIN): parse failed\n");
+                }
+            } else {
+                printf("Macros COMMIT: empty buffer\n");
+                tlv_store_macros_bin((const uint8_t*)"", 0);
+            }
+        } else {
+            // Append chunk
+            if (macros_bin_len + buffer_size <= sizeof(macros_bin_buf)) {
+                memcpy(macros_bin_buf + macros_bin_len, buffer, buffer_size);
+                macros_bin_len += buffer_size;
+            } else {
+                printf("Macros BIN buffer overflow, dropping chunk len=%u\n", buffer_size);
+            }
+        }
+        break;
+    }
     default:
         printf("Write to unknown handle %04X\n", att_handle);
         break;
@@ -929,6 +1082,7 @@ int btstack_main(int argc, const char* argv[])
     UNUSED(argv);
 
     tlv_utils_init();
+    macros_load_from_tlv();
     report_ring_buffer_init(&hid_report_ring_buffer);
     report_ring_buffer_init(&debug_report_ring_buffer);
 
