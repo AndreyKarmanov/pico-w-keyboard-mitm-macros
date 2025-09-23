@@ -11,6 +11,7 @@ typedef struct {
     uint8_t buffer[REPORT_RING_BUFFER_SIZE];
     uint16_t head;
     uint16_t tail;
+    uint16_t used_bytes;
     uint16_t item_count;
 } report_ring_buffer_t;
 

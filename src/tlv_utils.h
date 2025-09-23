@@ -9,8 +9,7 @@
 // Initialize TLV backend implementation/context
 void tlv_utils_init(void);
 
-// Parse ASCII device string "AA:BB:CC:DD:EE:FF,<type>,<name>" into target_device_t
-target_device_t tlv_parse_device_string(const char* s, uint16_t s_len);
+// Target device TLV now stored as binary: addr[6], addr_type(1), name_len(1), name[name_len]
 
 // Target device persistence helpers
 void tlv_delete_target(void);

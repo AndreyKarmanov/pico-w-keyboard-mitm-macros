@@ -39,6 +39,8 @@ add_executable(macro_itm
     src/tlv_utils.c
     src/print_utils.c
     src/ring_buffer_utils.c
+    src/macros_engine.c
+    src/seen_devices.c
 )
 
 pico_set_program_name(macro_itm "macro_itm")

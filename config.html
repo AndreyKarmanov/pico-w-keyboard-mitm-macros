@@ -7,8 +7,10 @@
   <style>
     body {
       font-family: system-ui, sans-serif;
-      margin: 2rem;
-      max-width: 900px;
+      /* Center page and let it expand on wide screens */
+      margin: 1rem auto;
+      max-width: clamp(1000px, 96vw, 1600px);
+      padding: 0 1rem;
     }
 
     h1 {
@@ -44,6 +46,26 @@
       text-align: left;
     }
 
+    /* Consistent cards and layout */
+    .card { border:1px solid #ddd; padding:.6rem; border-radius:.4rem; min-height: 84px; display:flex; flex-direction:column; gap:.4rem; background:#fff; }
+    .card-title { font-weight:600; margin:0 0 .2rem 0; }
+    .controls-row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+    .table-wrap { margin-top:.5rem; overflow-x:auto; }
+    .btn { padding:.3rem .6rem; }
+  .btn-slim { padding:.15rem .35rem; font-size:.9rem; }
+    .actions-cell { white-space: nowrap; }
+    .actions-cell .btn-slim { margin: 0 .25rem 0 0; }
+    .mono { font-family: monospace; }
+    .grid-2 { display:grid; grid-template-columns: 1fr 3rem 1fr; gap:1rem; align-items:stretch; }
+    .center-col { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.5rem; }
+    .arrow-btn { min-width: 2.4rem; }
+  .right { margin-left:auto; }
+
+    @media (max-width: 900px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      .center-col { flex-direction: row; }
+    }
+
     #devicesEmpty {
       color: #777;
       font-style: italic;
@@ -73,93 +95,107 @@
 
 <body>
   <h1>MITM Device Configuration</h1>
-  <section id="controls" style="display:grid; gap:.5rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items:center;">
-    <div id="connSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
-      <div style="font-weight:600; margin-bottom:.4rem;">Connection</div>
-      <button id="connectBtn">Connect</button>
-      <button id="disconnectBtn" disabled>Disconnect</button>
-      <div id="connState" style="display:inline-block; margin-left:.5rem; color:#555; font-size:.9rem;">Disconnected</div>
-    </div>
-    <div id="discSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
-      <div style="font-weight:600; margin-bottom:.4rem;">Discovery</div>
-      <button id="refreshBtn" disabled>Refresh</button>
-      <button id="clearBtn" disabled>Clear Seen Devices</button>
-      <label id="autoRefreshCtl" style="margin-left:.5rem;">
-        <input type="checkbox" id="autoRefresh"> Auto Refresh
-      </label>
-      <select id="intervalSel" disabled>
-        <option value="2000">2s</option>
-        <option value="5000" selected>5s</option>
-        <option value="10000">10s</option>
-      </select>
-      <div id="autoDiscInfo" style="margin-top:.4rem; color:#555; font-size:.9rem; display:none;">
-        Auto discovery: refresh in <span id="autoDiscCountdown">5</span>s
+  <section id="controls" style="display:grid; gap:.5rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); align-items:stretch;">
+    <div id="connSection" class="card">
+      <div class="card-title">Connection</div>
+      <div class="controls-row">
+        <button id="connectBtn" class="btn">Connect</button>
+        <button id="disconnectBtn" class="btn" disabled>Disconnect</button>
+        <div id="connState" style="margin-left:auto; color:#555; font-size:.9rem;">Disconnected</div>
       </div>
-    </div>
-    <div id="targetSection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
-      <div style="font-weight:600; margin-bottom:.4rem;">Target</div>
-      <div>Current: <span id="targetVal" class="mac">(none)</span></div>
-      <button id="clearTargetBtn" disabled style="margin-top:.4rem;">Clear Target</button>
-    </div>
-    <div id="notifySection" style="border:1px solid #ddd; padding:.6rem; border-radius:.4rem;">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div style="font-weight:600;">Notifications</div>
-        <button id="subscribeBtn" disabled>Subscribe</button>
-      </div>
-      <div id="notifyStatus" style="color:#555; font-size:.9rem; margin-top:.3rem;">Not subscribed</div>
     </div>
   </section>
   <div id="status" style="margin-top:.75rem;">Idle</div>
-  <div id="devicesContainer"></div>
-
-  <div id="notifyPanel" style="margin-top: 1.5rem;">
-    <h2>Notification Log</h2>
-    <div id="keysSummary" style="margin:.5rem 0;">
-      <div><strong>Latest keys:</strong> <span id="latestKeys">(none)</span></div>
-      <div><strong>Currently pressed:</strong> <span id="pressedKeys">(none)</span></div>
+  <section id="devicesSection" class="card" style="margin-top: 1rem;">
+    <div class="card-title">Select Target</div>
+    <div style="font-size:.9rem; color:#666; margin-top:-.25rem;">Pick a keyboard to MITM from the seen devices list, or set/clear a stored target.</div>
+    <div style="display:grid; grid-template-columns: 300px 1fr; gap:1rem; align-items:start;">
+      <!-- Left: Targeted Device -->
+      <div>
+        <h3 style="margin:.25rem 0;">Targeted Device</h3>
+        <div style="margin:.25rem 0; color:#555; font-size:.95rem;">Current: <span id="targetVal" class="mac">(none)</span></div>
+        <div class="controls-row" style="margin:.25rem 0;">
+          <button id="clearTargetBtn" class="btn" disabled>Clear Target</button>
+        </div>
+      </div>
+      <!-- Right: Found Devices + controls -->
+      <div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:.5rem; flex-wrap:wrap;">
+          <h3 style="margin:.25rem 0;">Found Devices</h3>
+          <div class="controls-row">
+            <button id="refreshBtn" class="btn" disabled>Refresh</button>
+            <button id="clearBtn" class="btn" disabled>Clear</button>
+            <label style="font-size:.9rem; color:#555; display:flex; align-items:center; gap:.35rem;"><input type="checkbox" id="autoRefresh"> Auto refresh (5s)</label>
+          </div>
+        </div>
+        <div id="devicesContainer" class="table-wrap"></div>
+      </div>
     </div>
-    <table>
-      <thead>
-        <tr><th style="width:8rem">Time</th><th style="width:4rem">ID</th><th style="width:10rem">Modifiers</th><th>Keys</th><th style="width:40%">Raw</th></tr>
-      </thead>
-      <tbody id="notifyTableBody"></tbody>
-    </table>
-  </div>
+  </section>
 
-  <div id="macrosPanel" style="margin-top: 2rem;">
-    <h2>Macros</h2>
-    <p style="color:#555; margin-top:-.5rem;">Create simple input→output mappings. Each field holds a single HID report in hex (ID-first). Tip: click a Notification Log row to paste into the focused field.</p>
-    <div style="margin:.5rem 0; display:flex; gap:.5rem; flex-wrap:wrap; align-items:center;">
-      <button id="downloadMacrosBtn" disabled>Download from Device</button>
-      <button id="uploadMacrosBtn" disabled>Upload to Device</button>
-      <button id="clearDeviceMacrosBtn" disabled>Clear on Device</button>
-      <span id="macrosSyncStatus" style="color:#555; font-size:.9rem;"></span>
+  <section id="macrosPanel" class="card" style="margin-top: 1rem;">
+    <div style="display:flex; align-items:center; gap:.5rem;">
+      <div class="card-title" style="margin:.25rem 0;">Macros</div>
+      <div class="right" style="display:flex; align-items:center; gap:.5rem;">
+        <label for="displayModeSel" style="font-size:.9rem; color:#555;">View</label>
+        <select id="displayModeSel">
+          <option value="hex">Hex</option>
+          <option value="keys">Keycodes</option>
+        </select>
+      </div>
     </div>
-    <table id="macrosTable">
-      <thead>
-        <tr>
-          <th style="width:3rem">#</th>
-          <th style="width:20%">Name</th>
-          <th>Input (match)</th>
-          <th>Output (replace)</th>
-          <th style="width:16rem">Actions</th>
-        </tr>
-      </thead>
-      <tbody id="macrosTBody"></tbody>
-      <tfoot>
-        <tr>
-          <td>+</td>
-          <td><input id="newMacroName" placeholder="Name" style="width:100%" /></td>
-          <td><textarea id="macroIn" rows="2" style="width:100%; font-family:monospace; resize:vertical" placeholder="01 00 04 00 00 00 00 00"></textarea></td>
-          <td><textarea id="macroOut" rows="2" style="width:100%; font-family:monospace; resize:vertical" placeholder="01 00 05 00 00 00 00 00"></textarea></td>
-          <td>
-            <button id="addMacroBtn" disabled>Add</button>
-            <button id="clearCreatorBtn">Clear</button>
-            <div id="macroError" style="color:#b00020; font-size:.85rem; margin-top:.25rem"></div>
-          </td>
-        </tr>
-      </tfoot>
-    </table>
+  <div style="color:#555; font-size:.95rem; margin-top:-.25rem;">Loaded from device on connect. Edit rows and click Save to write back. Click Raw or Modified in the Notification Log to paste into the focused field.</div>
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:.5rem; flex-wrap:wrap; margin-top:.5rem;">
+      <div></div>
+      <div class="controls-row">
+        <button id="macrosRefreshBtn" class="btn" disabled title="Load from device">Load</button>
+        <button id="macrosSaveBtn" class="btn" disabled title="Save to device">Save</button>
+        <span id="macrosStatus" style="color:#555; font-size:.9rem;">Not connected</span>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="macrosTable">
+        <thead>
+          <tr>
+            <th style="width:3rem">#</th>
+            <th>Input (match)</th>
+            <th>Output (replace)</th>
+            <th style="width:10.5rem">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="macrosTBody"></tbody>
+        <tfoot>
+          <tr>
+            <td>+</td>
+            <td><textarea id="macroIn" rows="2" style="width:100%; font-family:monospace; resize:vertical" placeholder="01 00 04 00 00 00 00 00" data-role="macro-in"></textarea></td>
+            <td><textarea id="macroOut" rows="2" style="width:100%; font-family:monospace; resize:vertical" placeholder="01 00 05 00 00 00 00 00" data-role="macro-out"></textarea></td>
+            <td>
+              <button id="addMacroBtn" disabled>Add</button>
+              <button id="clearCreatorBtn">Clear</button>
+              <div id="macroError" style="color:#b00020; font-size:.85rem; margin-top:.25rem"></div>
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  </section>
+
+  <div id="notifyPanel" class="card" style="margin-top: 1.5rem;">
+    <div style="display:flex; align-items:center; gap:.5rem;">
+      <h2 style="margin:.25rem 0;">Notification Log</h2>
+      <div class="right" style="display:flex; align-items:center; gap:.4rem;">
+        <button id="subscribeBtn" class="btn" disabled>Subscribe</button>
+      </div>
+    </div>
+    <div id="currentStateRow" style="margin:.5rem 0; color:#333; font-size:.95rem;"><strong>Current:</strong> <span id="currentState">(none)</span></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th style="width:8rem">Time</th><th style="width:4rem">ID</th><th>Raw</th><th>Modified</th></tr>
+        </thead>
+        <tbody id="notifyTableBody"></tbody>
+      </table>
+    </div>
   </div>
 
   <script>
@@ -169,7 +205,7 @@
   const TARGET_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf1';
   const LOG_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf2';
   const MACROS_CHAR_UUID = '12345678-90ab-cdef-0123-456789abcdf3';
-
+  
   let device, server, service, listChar, targetChar, logChar, macrosChar;
   let logSubscribed = false;
     // Auto discovery countdown timer state
@@ -182,57 +218,67 @@
   const targetValEl = document.getElementById('targetVal');
   const clearTargetBtn = document.getElementById('clearTargetBtn');
   const subscribeBtn = document.getElementById('subscribeBtn');
-  const notifyStatus = document.getElementById('notifyStatus');
   const connState = document.getElementById('connState');
-  const latestKeysEl = document.getElementById('latestKeys');
-  const pressedKeysEl = document.getElementById('pressedKeys');
+  const currentStateEl = document.getElementById('currentState');
   const notifyTableBody = document.getElementById('notifyTableBody');
   const disconnectBtn = document.getElementById('disconnectBtn');
+  const displayModeSel = document.getElementById('displayModeSel');
   // Macros UI refs
   const macrosTBody = document.getElementById('macrosTBody');
-  const newMacroNameEl = document.getElementById('newMacroName');
   const macroInEl = document.getElementById('macroIn');
   const macroOutEl = document.getElementById('macroOut');
   const addMacroBtn = document.getElementById('addMacroBtn');
   const clearCreatorBtn = document.getElementById('clearCreatorBtn');
   const macroErrorEl = document.getElementById('macroError');
-  const downloadMacrosBtn = document.getElementById('downloadMacrosBtn');
-  const uploadMacrosBtn = document.getElementById('uploadMacrosBtn');
-  const clearDeviceMacrosBtn = document.getElementById('clearDeviceMacrosBtn');
-  const macrosSyncStatus = document.getElementById('macrosSyncStatus');
-      const autoRefreshChk = document.getElementById('autoRefresh');
-      const intervalSel = document.getElementById('intervalSel');
-      const autoDiscInfo = document.getElementById('autoDiscInfo');
-      const autoDiscCountdown = document.getElementById('autoDiscCountdown');
+  const macrosRefreshBtn = document.getElementById('macrosRefreshBtn');
+  const macrosSaveBtn = document.getElementById('macrosSaveBtn');
+  const macrosStatus = document.getElementById('macrosStatus');
+  const autoRefreshChk = document.getElementById('autoRefresh');
 
   /** @type {Set<number>} */
   const pressedSet = new Set();
+  // Maintain FIFO of physically pressed keys across frames for ordering extras
+  const keyFifo = [];
   const MAX_ROWS = 50;
   const LS_KEY = 'mitm_macro_pairs_v1';
-  /** @type {{name:string,inHex:string,outHex:string}[]} */
+  const LS_DISPLAY_MODE = 'mitm_display_mode_v1';
+  /** @type {{inHex:string,outHex:string}[]} */
   let macros = [];
   // Track table edit state: -1 for none, otherwise index being edited
   let editingIndex = -1;
+  let lastMacroTargetEl = null;
+  let loadedSnapshot = [];
+  // Display mode: 'hex' | 'keys'
+  let displayMode = (localStorage.getItem(LS_DISPLAY_MODE) === 'keys') ? 'keys' : 'hex';
+  displayModeSel.value = displayMode;
+  displayModeSel.addEventListener('change', () => {
+    displayMode = displayModeSel.value;
+    localStorage.setItem(LS_DISPLAY_MODE, displayMode);
+  renderMacrosTable();
+    renderDeviceMacrosTable();
+    // Re-render notifications table if available
+    if (typeof renderNotifyTable === 'function') renderNotifyTable();
+    if (typeof renderCurrentState === 'function') renderCurrentState();
+  });
 
       function setStatus(msg) {
         statusEl.textContent = msg;
         console.log('[STATUS]', msg);
       }
 
-      function enableControls(connected) {
+  function enableControls(connected) {
         connState.textContent = connected ? 'Connected' : 'Disconnected';
         qs('refreshBtn').disabled = !connected;
         qs('clearBtn').disabled = !connected;
-  intervalSel.disabled = !connected || !autoRefreshChk.checked;
         clearTargetBtn.disabled = !connected;
         subscribeBtn.disabled = !connected;
         subscribeBtn.textContent = logSubscribed ? 'Unsubscribe' : 'Subscribe';
-        notifyStatus.textContent = logSubscribed ? 'Subscribed' : 'Not subscribed';
+        
         disconnectBtn.disabled = !connected;
-        // macros sync controls
-        downloadMacrosBtn.disabled = !connected;
-        uploadMacrosBtn.disabled = !connected;
-        clearDeviceMacrosBtn.disabled = !connected;
+  // macros controls
+  macrosRefreshBtn.disabled = !connected;
+  // Save button enablement is also governed by dirty-state in updateDirtyStatus
+  updateDirtyStatus();
       }
 
       async function connect() {
@@ -269,6 +315,8 @@
           setStatus('Connected.');
           enableControls(true);
           await refresh();
+          // Load macros from device on connect
+          await downloadMacros();
           // Auto behaviors: subscribe to notifications and start auto refresh if no target
           ensureAutoBehaviors();
         } catch (e) {
@@ -287,7 +335,9 @@
         }
         logSubscribed = false;
         logChar = null;
-        notifyStatus.textContent = 'Not subscribed';
+        
+        // show empty devices table with headers to avoid blank UI
+        renderDevices([]);
       }
 
       async function disconnect() {
@@ -298,35 +348,44 @@
         } catch (_) {}
       }
 
-      function parseListing(text) {
-        return text
-          .split(/\r?\n/)
-          .map(l => l.trim())
-          .filter(l => l.length)
-          .map(line => {
-            const parts = line.split(',');
-            return { mac: parts[0], type: parts[1], name: parts.slice(2).join(',') };
-          });
+      // Keep a cached list of seen devices in binary-parsed form
+      let lastDevices = [];
+
+      function bytesToMac(addrBytes) {
+        return Array.from(addrBytes).map(b => b.toString(16).padStart(2, '0')).join(':').toUpperCase();
+      }
+
+      function parseDevicesBinary(dv) {
+        const a = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+        const res = [];
+        if (a.length < 1) return res;
+        let p = 0;
+        const count = a[p++];
+        for (let i = 0; i < count; i++) {
+          if (p + 6 + 1 + 1 > a.length) break;
+          const addr = a.slice(p, p + 6); p += 6;
+          const type = a[p++];
+          const nameLen = a[p++];
+          if (p + nameLen > a.length) break;
+          const name = new TextDecoder().decode(a.slice(p, p + nameLen)); p += nameLen;
+          res.push({ addr, type, name });
+        }
+        return res;
       }
 
       async function refreshTarget() {
         if (!targetChar) return;
         try {
           const value = await targetChar.readValue();
-          const raw = new TextDecoder().decode(value.buffer).trim();
-          if (raw) {
-            const parts = raw.split(',');
-            if (parts.length >= 3) {
-              const mac = parts[0];
-              const type = parts[1];
-              const name = parts.slice(2).join(',');
-              targetValEl.textContent = `${mac} (type ${type}) ${name}`;
-            } else {
-              targetValEl.textContent = raw;
-            }
-          } else {
-            targetValEl.textContent = '(none)';
-          }
+          const a = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+          if (a.length === 0) { targetValEl.textContent = '(none)'; return; }
+          if (a.length < 8) { targetValEl.textContent = '(invalid)'; return; }
+          let p = 0;
+          const addr = a.slice(p, p + 6); p += 6;
+          const type = a[p++];
+          const nameLen = a[p++];
+          const name = new TextDecoder().decode(a.slice(p, p + nameLen));
+          targetValEl.textContent = `${bytesToMac(addr)} (type ${type}) ${name}`;
         } catch (e) {
           console.warn('Target read failed', e);
         }
@@ -334,32 +393,39 @@
 
       function renderDevices(list) {
         if (!list.length) {
-          devicesContainer.innerHTML = '<div id="devicesEmpty">No devices recorded yet.</div>';
+          devicesContainer.innerHTML = '<table><thead><tr><th>#</th><th>MAC</th><th>Type</th><th>Name</th><th>Select</th></tr></thead><tbody><tr><td colspan="5" id="devicesEmpty">No devices recorded yet.</td></tr></tbody></table>';
           return;
         }
         let html = '<table><thead><tr><th>#</th><th>MAC</th><th>Type</th><th>Name</th><th>Select</th></tr></thead><tbody>';
         list.forEach((d, i) => {
           html += `<tr>
         <td>${i + 1}</td>
-        <td class="mac">${d.mac}</td>
+        <td class="mac">${bytesToMac(d.addr)}</td>
         <td>${d.type}</td>
         <td>${d.name || ''}</td>
-        <td><button class="select-btn" data-mac="${d.mac}" data-type="${d.type}" data-name="${d.name || ''}">Set Target</button></td>
+        <td><button class="select-btn" data-idx="${i}">Set Target</button></td>
       </tr>`;
         });
         html += '</tbody></table>';
         devicesContainer.innerHTML = html;
         devicesContainer.querySelectorAll('.select-btn').forEach(btn => {
-          btn.addEventListener('click', () => setTarget(btn.dataset.mac, btn.dataset.type, btn.dataset.name));
+          btn.addEventListener('click', () => setTargetByIndex(parseInt(btn.dataset.idx, 10)));
         });
       }
 
-      async function setTarget(mac, type = '0', name = '') {
+      async function setTargetByIndex(idx) {
         if (!targetChar) return;
+        const d = lastDevices[idx]; if (!d) return;
         try {
           setStatus('Setting target...');
-          const enc = new TextEncoder();
-          await targetChar.writeValueWithoutResponse(enc.encode(`${mac},${type},${name}`));
+          const nameBytes = new TextEncoder().encode(d.name || '');
+          const buf = new Uint8Array(1 + 6 + 1 + 1 + nameBytes.length);
+          let p = 0; buf[p++] = 0x01; // SET opcode
+          buf.set(d.addr, p); p += 6;
+          buf[p++] = d.type & 0xFF;
+          buf[p++] = nameBytes.length & 0xFF;
+          if (nameBytes.length) { buf.set(nameBytes, p); p += nameBytes.length; }
+          await targetChar.writeValue(buf);
           setTimeout(async () => {
             await refreshTarget();
             setStatus('Target set.');
@@ -373,8 +439,7 @@
         if (!targetChar) return;
         try {
           setStatus('Clearing target...');
-          const enc = new TextEncoder();
-          await targetChar.writeValueWithoutResponse(enc.encode('CLEAR'));
+          await targetChar.writeValue(Uint8Array.of(0x00));
           setTimeout(async () => {
             await refreshTarget();
             setStatus('Target cleared.');
@@ -389,8 +454,8 @@
         try {
           setStatus('Reading devices...');
           const value = await listChar.readValue();
-          const text = new TextDecoder().decode(value.buffer);
-          renderDevices(parseListing(text));
+          lastDevices = parseDevicesBinary(value);
+          renderDevices(lastDevices);
           await refreshTarget();
           setStatus('Last updated: ' + new Date().toLocaleTimeString());
         } catch (e) {
@@ -403,8 +468,7 @@
         if (!listChar) return;
         try {
           setStatus('Clearing...');
-          const enc = new TextEncoder();
-          await listChar.writeValueWithoutResponse(enc.encode('CLEAR'));
+          await listChar.writeValue(Uint8Array.of(0x00));
           // Small delay to allow device to process before re-read
           setTimeout(refresh, 300);
         } catch (e) {
@@ -413,32 +477,14 @@
         }
       }
 
-      function getIntervalSec() {
-        const ms = parseInt(intervalSel.value, 10);
-        return Math.max(1, Math.floor(ms / 1000));
-      }
-
-      function resetCountdown() {
-        countdownSec = getIntervalSec();
-        autoDiscCountdown.textContent = String(countdownSec);
-      }
-
       function startAuto() {
         stopAuto();
-        intervalSel.disabled = false;
-        resetCountdown();
         autoTickTimer = setInterval(async () => {
-          countdownSec -= 1;
-          if (countdownSec <= 0) {
-            await refresh();
-            resetCountdown();
-          }
-          autoDiscCountdown.textContent = String(countdownSec);
-        }, 1000);
+          await refresh();
+        }, 5000);
       }
 
       function stopAuto() {
-        intervalSel.disabled = true;
         if (autoTickTimer) clearInterval(autoTickTimer);
         autoTickTimer = null;
       }
@@ -455,9 +501,9 @@
             autoRefreshChk.checked = true;
             startAuto();
           }
-          autoDiscInfo.style.display = '';
         } else {
-          autoDiscInfo.style.display = 'none';
+          autoRefreshChk.checked = false;
+          stopAuto();
         }
       }
 
@@ -467,60 +513,191 @@
           hex += view.getUint8(i).toString(16).padStart(2, '0');
           if (i + 1 < view.byteLength) hex += ' ';
         }
-        return hex;
+        return hex.toUpperCase();
+      }
+
+      function parseKbdReport(arr) {
+        if (!arr || arr.length < 2) return null;
+        const id = arr[0];
+        const payload = arr.slice(1);
+        if (payload.length < 2) return null;
+        const mod = payload[0];
+        let hasRes = false;
+        let kstart = 1;
+        if (payload.length >= 8) { hasRes = true; kstart = 2; }
+        else if (payload.length === 7) { hasRes = false; kstart = 1; }
+        else {
+          const rem = payload.length - 1;
+          hasRes = !(rem <= 6);
+          kstart = hasRes ? 2 : 1;
+        }
+        const keys = Array.from(payload.slice(kstart, kstart + 6));
+        return { id, mod, hasRes, keys };
+      }
+
+      function uniqKeys(keys) {
+        const out = [];
+        for (const k of keys) {
+          if (!k) continue;
+          if (!out.includes(k)) out.push(k);
+        }
+        return out;
+      }
+
+      function isSubset(a, b) {
+        // a subset of b (both arrays of keycodes)
+        return a.every(x => b.includes(x));
+      }
+
+      function updateKeyFifo(pressedKeys) {
+        // remove keys no longer pressed
+        for (let i = 0; i < keyFifo.length; ) {
+          if (!pressedKeys.includes(keyFifo[i])) keyFifo.splice(i, 1); else i++;
+        }
+        // append new pressed keys
+        for (const k of pressedKeys) if (!keyFifo.includes(k)) keyFifo.push(k);
+      }
+
+      function applyMacrosLocally(bytes) {
+        const MAX_KEYS = 6;
+        const inArr = Array.from(bytes);
+        const parsedIn = parseKbdReport(inArr);
+        if (!parsedIn) return bytes;
+        const inKeysSet = uniqKeys(parsedIn.keys);
+        // FIFO update happens in onLogNotification after parsing
+
+        for (const m of macros) {
+          const inB = Array.from(hexToBytes(m.inHex));
+          const outB = Array.from(hexToBytes(m.outHex));
+          if (inB.length < 2 || outB.length < 2) continue;
+          const pin = parseKbdReport(inB);
+          const pout = parseKbdReport(outB);
+          if (!pin || !pout) continue;
+          if (pin.id !== parsedIn.id) continue;
+          const mKeysSet = uniqKeys(pin.keys);
+          // modifiers subset and key subset
+          if ((parsedIn.mod & pin.mod) !== pin.mod) continue;
+          if (!isSubset(mKeysSet, inKeysSet)) continue;
+
+          // Compose
+          const finalMod = (parsedIn.mod | pout.mod) & 0xFF;
+          // final keys = (in - macro_in) U macro_out
+          const finalSet = [];
+          for (const k of inKeysSet) if (!mKeysSet.includes(k) && !finalSet.includes(k)) finalSet.push(k);
+          const outKeysSet = uniqKeys(pout.keys);
+          for (const k of outKeysSet) if (!finalSet.includes(k)) finalSet.push(k);
+
+          // order: out keys first, then extras by FIFO
+          const ordered = [];
+          for (const k of outKeysSet) if (k && !ordered.includes(k) && ordered.length < MAX_KEYS) ordered.push(k);
+          for (const k of keyFifo) {
+            if (ordered.length >= MAX_KEYS) break;
+            if (finalSet.includes(k) && !ordered.includes(k)) ordered.push(k);
+          }
+          while (ordered.length < MAX_KEYS) ordered.push(0);
+
+          const out = [];
+          out.push(pout.id);
+          out.push(finalMod);
+          if (parsedIn.hasRes) out.push(0x00);
+          out.push(...ordered.slice(0, MAX_KEYS));
+          return new Uint8Array(out);
+        }
+        return bytes;
+      }
+
+      // Record buffer for notifications; supports re-render on view switch
+      const logRecords = [];
+
+      function summarizeBytesAsKeys(bytes) {
+        const parsed = parseKeyboardWithIdFirst(Array.from(bytes));
+        if (!parsed) return bytesToHex(bytes);
+        const mods = decodeModifiers(parsed.mod).join('+');
+        const names = parsed.keys.map(k => KEYMAP[k] || `0x${k.toString(16)}`).join(', ');
+        const idPart = `ID ${parsed.id}`;
+        const modPart = mods ? ` | ${mods}` : '';
+        const keysPart = names ? ` | ${names}` : '';
+        return `${idPart}${modPart}${keysPart}`;
+      }
+
+      function renderNotifyTable() {
+        notifyTableBody.innerHTML = '';
+        const rows = logRecords.slice(-MAX_ROWS).reverse();
+        for (const rec of rows) {
+          const tr = document.createElement('tr');
+          const t = rec.time.toLocaleTimeString();
+          const rawDisp = displayMode === 'keys' ? summarizeBytesAsKeys(rec.rawBytes) : bytesToHex(rec.rawBytes);
+          const modDisp = displayMode === 'keys' ? summarizeBytesAsKeys(rec.modBytes) : bytesToHex(rec.modBytes);
+          const timeTd = document.createElement('td'); timeTd.textContent = t;
+          const idTd = document.createElement('td'); idTd.textContent = String(rec.id);
+          const rawTd = document.createElement('td'); rawTd.className = 'mac'; rawTd.textContent = rawDisp; rawTd.style.cursor = 'pointer'; rawTd.title = 'Click to paste into Input (match)';
+          const modTd = document.createElement('td'); modTd.className = 'mac'; modTd.textContent = modDisp; modTd.style.cursor = 'pointer'; modTd.title = 'Click to paste into Output (replace)';
+          rawTd.addEventListener('click', () => pasteHexToActive(bytesToHex(rec.rawBytes)));
+          modTd.addEventListener('click', () => pasteHexToActive(bytesToHex(rec.modBytes)));
+          tr.appendChild(timeTd); tr.appendChild(idTd); tr.appendChild(rawTd); tr.appendChild(modTd);
+          notifyTableBody.appendChild(tr);
+        }
+      }
+
+      function renderCurrentState() {
+        const last = logRecords[logRecords.length - 1];
+        if (!last) { currentStateEl.textContent = '(none)'; return; }
+        const id = last.id;
+        const rawDisp = displayMode === 'keys' ? summarizeBytesAsKeys(last.rawBytes) : bytesToHex(last.rawBytes);
+        const modDisp = displayMode === 'keys' ? summarizeBytesAsKeys(last.modBytes) : bytesToHex(last.modBytes);
+        currentStateEl.textContent = `ID ${id} | Raw: ${rawDisp} | Modified: ${modDisp}`;
       }
 
       function onLogNotification(event) {
         const dv = event.target.value; // DataView
-        const hex = bufferToHex(dv);
-        console.log('[NOTIFY]', hex);
+        const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+        console.log('[NOTIFY]', bytesToHex(bytes));
         setStatus('Last notification: ' + new Date().toLocaleTimeString());
 
-        const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-        // Expect first byte to be Report ID, remainder is payload
-        const parsed = parseKeyboardWithIdFirst(bytes);
-        let idForLog = 0;
-        let modsForLog = '';
-        let keysForLog = '';
+        // New composite format: [base_id][0xC0][raw_len][raw_payload][mod_id][mod_len][mod_payload]
+        let rawBytes = null;
+        let modBytes = null;
+        if (bytes.length >= 2 && bytes[1] === 0xC0) {
+          let p = 2;
+          const baseId = bytes[0] || 0;
+          if (p >= bytes.length) return; // malformed
+          const rawLen = bytes[p++];
+          if (p + rawLen > bytes.length) return; // malformed
+          const rawPayload = bytes.slice(p, p + rawLen); p += rawLen;
+          if (p >= bytes.length) return; // malformed
+          const modId = bytes[p++];
+          if (p >= bytes.length) return; // malformed
+          const modLen = bytes[p++];
+          if (p + modLen > bytes.length) return; // malformed
+          const modPayload = bytes.slice(p, p + modLen); p += modLen;
+          rawBytes = new Uint8Array(1 + rawPayload.length);
+          rawBytes[0] = baseId; rawBytes.set(rawPayload, 1);
+          modBytes = new Uint8Array(1 + modPayload.length);
+          modBytes[0] = modId; modBytes.set(modPayload, 1);
+        } else {
+          // Fallback to legacy: bytes contain raw, compute modified locally
+          rawBytes = bytes;
+          modBytes = applyMacrosLocally(bytes);
+        }
+
+        // Parse for UI summary using rawBytes
+        const parsed = parseKeyboardWithIdFirst(Array.from(rawBytes));
+        let idForLog = rawBytes.length > 0 ? rawBytes[0] : 0;
+        let modsForLog = '—';
+        let keysForLog = '—';
         if (parsed) {
           idForLog = parsed.id;
           const mods = decodeModifiers(parsed.mod);
           modsForLog = mods.join('+') || '—';
-
           const names = parsed.keys.map(k => KEYMAP[k] || `0x${k.toString(16)}`);
           keysForLog = names.join(', ') || '—';
-
           updatePressedKeys(parsed.keys);
-          latestKeysEl.textContent = describeLatestChange(parsed.keys);
-          pressedKeysEl.textContent = describePressed();
-        } else {
-          // Non-keyboard or unknown format; assume first byte is a report ID if present.
-          idForLog = bytes.length > 0 ? bytes[0] : 0;
-          modsForLog = '—';
-          keysForLog = '—';
+          updateKeyFifo(parsed.keys);
         }
 
-        addNotifyRow({
-          time: new Date(),
-          id: idForLog,
-          mods: modsForLog,
-          keys: keysForLog,
-          hex
-        });
-
-      }
-
-      function addNotifyRow(rec) {
-        const tr = document.createElement('tr');
-        const t = rec.time.toLocaleTimeString();
-        tr.innerHTML = `<td>${t}</td><td>${rec.id}</td><td>${escapeHtml(rec.mods)}</td><td>${escapeHtml(rec.keys)}</td><td class="mac">${escapeHtml(rec.hex)}</td>`;
-        tr.style.cursor = 'pointer';
-        tr.title = 'Click to paste raw hex into the focused macro field';
-        tr.addEventListener('click', () => pasteHexToActive(rec.hex));
-        notifyTableBody.insertBefore(tr, notifyTableBody.firstChild);
-        while (notifyTableBody.rows.length > MAX_ROWS) {
-          notifyTableBody.deleteRow(notifyTableBody.rows.length - 1);
-        }
+        logRecords.push({ time: new Date(), id: idForLog, mods: modsForLog, keys: keysForLog, rawBytes, modBytes });
+        renderNotifyTable();
+        renderCurrentState();
       }
 
       function escapeHtml(s) {
@@ -562,7 +739,7 @@
         return { id, mod, keys };
       }
 
-      // Minimal HID keycode map (Usage Page 0x07)
+      // Expanded HID keycode map (Usage Page 0x07)
       const KEYMAP = (() => {
         const m = {};
         // Letters A-Z (0x04..0x1d)
@@ -574,10 +751,18 @@
         Object.assign(m, {0x28:'ENTER',0x29:'ESC',0x2a:'BACKSPACE',0x2b:'TAB',0x2c:'SPACE'});
         // Symbols around 0x2d..0x38
         Object.assign(m, {0x2d:'-',0x2e:'=',0x2f:'[',0x30:']',0x31:'\\',0x32:'#',0x33:';',0x34:"'",0x35:'`',0x36:',',0x37:'.',0x38:'/'});
-        // F1..F12 (0x3a..0x45)
+        // CapsLock and F1..F24
+        m[0x39] = 'CAPSLOCK';
         for (let i = 0; i < 12; i++) m[0x3a + i] = 'F' + (i + 1);
-        // Arrows and common nav
-        Object.assign(m, {0x4a:'HOME',0x4b:'PGUP',0x4c:'DEL',0x4d:'END',0x4e:'PGDN',0x4f:'RIGHT',0x50:'LEFT',0x51:'DOWN',0x52:'UP',0x53:'NUMLOCK'});
+        for (let i = 0; i < 12; i++) m[0x68 + i] = 'F' + (i + 13);
+        // Nav/system keys
+        Object.assign(m, {0x46:'PRINTSCREEN',0x47:'SCROLLLOCK',0x48:'PAUSE',0x49:'INSERT',0x4a:'HOME',0x4b:'PGUP',0x4c:'DELETE',0x4d:'END',0x4e:'PGDN',0x4f:'RIGHT',0x50:'LEFT',0x51:'DOWN',0x52:'UP',0x53:'NUMLOCK'});
+        // Keypad
+        Object.assign(m, {0x54:'KP /',0x55:'KP *',0x56:'KP -',0x57:'KP +',0x58:'KP ENTER',0x59:'KP 1',0x5a:'KP 2',0x5b:'KP 3',0x5c:'KP 4',0x5d:'KP 5',0x5e:'KP 6',0x5f:'KP 7',0x60:'KP 8',0x61:'KP 9',0x62:'KP 0',0x63:'KP .'});
+        // Non-US, Application, Power, KP =
+        Object.assign(m, {0x64:'NONUS \\ |',0x65:'APPLICATION',0x66:'POWER',0x67:'KP ='});
+        // International/Lang (subset labels)
+        Object.assign(m, {0x87:'INTL1',0x88:'INTL2',0x89:'INTL3',0x8a:'INTL4',0x8b:'INTL5',0x8c:'INTL6',0x8d:'INTL7',0x8e:'INTL8',0x8f:'INTL9',0x90:'LANG1',0x91:'LANG2',0x92:'LANG3',0x93:'LANG4',0x94:'LANG5'});
         return m;
       })();
 
@@ -612,9 +797,8 @@
         try {
           const raw = localStorage.getItem(LS_KEY);
           const parsed = raw ? JSON.parse(raw) : [];
-          // Migrate old schema {inHex,outHex} -> add name
+          // Migrate old schema by ignoring name and keeping in/out
           macros = Array.isArray(parsed) ? parsed.map(m => ({
-            name: typeof m.name === 'string' ? m.name : '',
             inHex: m.inHex || '',
             outHex: m.outHex || ''
           })) : [];
@@ -624,8 +808,21 @@
         renderMacrosTable();
       }
 
-      function saveMacros() {
-        localStorage.setItem(LS_KEY, JSON.stringify(macros));
+      function saveMacrosLocal() { localStorage.setItem(LS_KEY, JSON.stringify(macros)); }
+
+      function macrosEqual(a, b) {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+          if (a[i].inHex !== b[i].inHex || a[i].outHex !== b[i].outHex) return false;
+        }
+        return true;
+      }
+
+      function updateDirtyStatus() {
+        const dirty = !macrosEqual(macros, loadedSnapshot);
+        macrosSaveBtn.disabled = !server || !server.connected || !dirty;
+        const base = (!server || !server.connected) ? 'Not connected' : dirty ? 'You have unsaved changes' : 'No unsaved changes';
+        macrosStatus.textContent = base;
       }
 
       function hexToBytes(hex) {
@@ -640,16 +837,14 @@
       }
 
       function macrosToBinary() {
-        // Compute size
+        // Keep header format for compatibility, but write zero-length names.
         let size = 6; // magic + ver + count
-        const inArrs = []; const outArrs = []; const nameBytes = [];
+        const inArrs = []; const outArrs = [];
         for (const m of macros) {
           const inB = hexToBytes(m.inHex);
           const outB = hexToBytes(m.outHex);
-          const nm = (m.name || '').trim();
-          const nb = new TextEncoder().encode(nm);
-          inArrs.push(inB); outArrs.push(outB); nameBytes.push(nb);
-          size += 2 + nb.length + inB.length + outB.length;
+          inArrs.push(inB); outArrs.push(outB);
+          size += 2 + 0 + inB.length + outB.length; // nameLen=0 + len + in + out
         }
         const buf = new Uint8Array(size);
         let p = 0;
@@ -657,10 +852,10 @@
         buf[p++] = 1; // version
         buf[p++] = macros.length & 0xFF;
         for (let i = 0; i < macros.length; i++) {
-          const nb = nameBytes[i]; const inB = inArrs[i]; const outB = outArrs[i];
-          buf[p++] = nb.length & 0xFF;
+          const inB = inArrs[i]; const outB = outArrs[i];
+          buf[p++] = 0; // name length
           buf[p++] = inB.length & 0xFF; // len
-          buf.set(nb, p); p += nb.length;
+          // no name bytes written
           buf.set(inB, p); p += inB.length;
           buf.set(outB, p); p += outB.length;
         }
@@ -679,10 +874,11 @@
           const nameLen = a[p++];
           const len = a[p++];
           if (len === 0 || p + nameLen + len + len > a.length) break;
-          const name = new TextDecoder().decode(a.slice(p, p + nameLen)); p += nameLen;
+          // Skip name for UI simplicity
+          p += nameLen;
           const inB = a.slice(p, p + len); p += len;
           const outB = a.slice(p, p + len); p += len;
-          out.push({ name, inHex: bytesToHex(inB), outHex: bytesToHex(outB) });
+          out.push({ inHex: bytesToHex(inB), outHex: bytesToHex(outB) });
         }
         return out;
       }
@@ -690,6 +886,12 @@
       function normalizeHex(text) {
         return text.trim().replace(/\s+/g, ' ').toUpperCase();
       }
+      function macroDisplay(hexText) {
+        if (displayMode !== 'keys') return escapeHtml(hexText);
+        const bytes = hexToBytes(hexText);
+        return escapeHtml(summarizeBytesAsKeys(bytes));
+      }
+
       function renderMacrosTable() {
         macrosTBody.innerHTML = '';
         macros.forEach((m, idx) => {
@@ -697,52 +899,49 @@
           if (editingIndex === idx) {
             tr.innerHTML = `
               <td>${idx + 1}</td>
-              <td><input class="edit-name" value="${escapeHtml(m.name || '')}" style="width:100%" /></td>
               <td><textarea class="edit-in" rows="1" style="width:100%; font-family:monospace; resize:none" data-role="macro-in">${escapeHtml(m.inHex)}</textarea></td>
               <td><textarea class="edit-out" rows="1" style="width:100%; font-family:monospace; resize:none" data-role="macro-out">${escapeHtml(m.outHex)}</textarea></td>
-              <td>
+              <td class="actions-cell">
                 <button class="save">Save</button>
                 <button class="cancel">Cancel</button>
                 <span class="rowErr" style="color:#b00020; margin-left:.5rem"></span>
               </td>`;
-            const nameI = tr.querySelector('.edit-name');
             const inTA = tr.querySelector('.edit-in');
             const outTA = tr.querySelector('.edit-out');
             const rowErr = tr.querySelector('.rowErr');
-            const doValidate = () => { rowErr.textContent = validatePair(nameI.value, inTA.value, outTA.value) || ''; };
-            nameI.addEventListener('input', doValidate);
+            const doValidate = () => { rowErr.textContent = validatePair(inTA.value, outTA.value) || ''; };
             inTA.addEventListener('input', doValidate);
             outTA.addEventListener('input', doValidate);
             inTA.addEventListener('focus', () => {});
             outTA.addEventListener('focus', () => {});
             tr.querySelector('.save').addEventListener('click', () => {
-              const err = validatePair(nameI.value, inTA.value, outTA.value);
+              const err = validatePair(inTA.value, outTA.value);
               if (err) {
                 rowErr.textContent = err;
                 return;
               }
-              m.name = (nameI.value || '').trim();
               m.inHex = normalizeHex(inTA.value);
               m.outHex = normalizeHex(outTA.value);
               editingIndex = -1;
-              saveMacros();
+              saveMacrosLocal();
               renderMacrosTable();
+              updateDirtyStatus();
             });
             tr.querySelector('.cancel').addEventListener('click', () => {
               editingIndex = -1;
               renderMacrosTable();
+              updateDirtyStatus();
             });
           } else {
             tr.innerHTML = `
               <td>${idx + 1}</td>
-              <td>${escapeHtml(m.name || '')}</td>
-              <td><div style="font-family:monospace">${escapeHtml(m.inHex)}</div></td>
-              <td><div style="font-family:monospace">${escapeHtml(m.outHex)}</div></td>
-              <td>
-                <button class="up">Up</button>
-                <button class="down">Down</button>
-                <button class="edit">Edit</button>
-                <button class="del">Delete</button>
+              <td><div style="font-family:monospace">${macroDisplay(m.inHex)}</div></td>
+              <td><div style="font-family:monospace">${macroDisplay(m.outHex)}</div></td>
+              <td class="actions-cell">
+                <button class="up btn-slim" title="Move up">▲</button>
+                <button class="down btn-slim" title="Move down">▼</button>
+                <button class="edit btn-slim" title="Edit">✎</button>
+                <button class="del btn-slim" title="Delete">␡</button>
               </td>`;
             tr.querySelector('.up').addEventListener('click', () => moveMacro(idx, -1));
             tr.querySelector('.down').addEventListener('click', () => moveMacro(idx, +1));
@@ -750,6 +949,21 @@
             tr.querySelector('.del').addEventListener('click', () => deleteMacro(idx));
           }
           macrosTBody.appendChild(tr);
+        });
+        updateDirtyStatus();
+      }
+
+      function renderDeviceMacrosTable() {
+        const tbody = document.getElementById('macrosDeviceTBody');
+        if (!tbody) return;
+        tbody.innerHTML = '';
+        (macros || []).forEach((m, idx) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${idx + 1}</td>
+            <td><div style="font-family:monospace">${macroDisplay(m.inHex)}</div></td>
+            <td><div style="font-family:monospace">${macroDisplay(m.outHex)}</div></td>`;
+          tbody.appendChild(tr);
         });
       }
 
@@ -759,18 +973,19 @@
         const tmp = macros[idx];
         macros[idx] = macros[j];
         macros[j] = tmp;
-        saveMacros();
+        saveMacrosLocal();
         renderMacrosTable();
+        updateDirtyStatus();
       }
 
       function deleteMacro(idx) {
         macros.splice(idx, 1);
-        saveMacros();
+        saveMacrosLocal();
         renderMacrosTable();
+        updateDirtyStatus();
       }
 
       function clearCreator() {
-        newMacroNameEl.value = '';
         macroInEl.value = '';
         macroOutEl.value = '';
         macroErrorEl.textContent = '';
@@ -784,7 +999,7 @@
         return t.split(' ').map(x => parseInt(x, 16));
       }
 
-      function validatePair(name, inText, outText) {
+      function validatePair(inText, outText) {
         const a = parseHexToArray(inText);
         const b = parseHexToArray(outText);
         if (a === null) return 'Input must be hex bytes (e.g., "01 00 04 00 ...")';
@@ -796,86 +1011,81 @@
       }
 
       function updateCreatorControls() {
-        const err = validatePair(newMacroNameEl.value, macroInEl.value, macroOutEl.value);
+        const err = validatePair(macroInEl.value, macroOutEl.value);
         macroErrorEl.textContent = err || '';
         addMacroBtn.disabled = !!err;
       }
 
       function addMacro() {
-        const err = validatePair(newMacroNameEl.value, macroInEl.value, macroOutEl.value);
+        const err = validatePair(macroInEl.value, macroOutEl.value);
         if (err) { macroErrorEl.textContent = err; return; }
-        const name = (newMacroNameEl.value || '').trim();
         const inHex = normalizeHex(macroInEl.value);
         const outHex = normalizeHex(macroOutEl.value);
-        macros.push({ name, inHex, outHex });
-        saveMacros();
+        macros.push({ inHex, outHex });
+        saveMacrosLocal();
         renderMacrosTable();
         clearCreator();
+        updateDirtyStatus();
       }
 
       async function downloadMacros() {
         if (!macrosChar) return;
-        macrosSyncStatus.textContent = 'Downloading...';
+        macrosStatus.textContent = 'Downloading...';
         try {
           const v = await macrosChar.readValue();
           macros = binaryToMacros(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
-          saveMacros();
           renderMacrosTable();
-          macrosSyncStatus.textContent = `Downloaded ${macros.length} macros.`;
+          loadedSnapshot = JSON.parse(JSON.stringify(macros));
+          macrosStatus.textContent = `Loaded ${macros.length} macros from device.`;
+          updateDirtyStatus();
         } catch (e) {
-          macrosSyncStatus.textContent = `Download failed: ${e}`;
+          macrosStatus.textContent = `Download failed: ${e}`;
         }
       }
 
       async function uploadMacros() {
         if (!macrosChar) return;
         const bin = macrosToBinary();
-        const enc = new TextEncoder();
-        macrosSyncStatus.textContent = 'Uploading...';
+        macrosStatus.textContent = 'Saving...';
         try {
-          await macrosChar.writeValueWithoutResponse(enc.encode('BEGIN'));
+          await macrosChar.writeValue(Uint8Array.of(0x01)); // BEGIN
           const CH = 180;
           for (let i = 0; i < bin.length; i += CH) {
-            await macrosChar.writeValueWithoutResponse(bin.slice(i, i + CH));
+            await macrosChar.writeValue(bin.slice(i, i + CH));
           }
-          await macrosChar.writeValueWithoutResponse(enc.encode('COMMIT'));
-          macrosSyncStatus.textContent = `Uploaded ${macros.length} macros.`;
+          await macrosChar.writeValue(Uint8Array.of(0x02)); // COMMIT
+          loadedSnapshot = JSON.parse(JSON.stringify(macros));
+          macrosStatus.textContent = `Saved ${macros.length} macros to device.`;
+          updateDirtyStatus();
         } catch (e) {
-          macrosSyncStatus.textContent = `Upload failed: ${e}`;
+          macrosStatus.textContent = `Save failed: ${e}`;
         }
       }
 
-      async function clearDeviceMacros() {
-        if (!macrosChar) return;
-        const enc = new TextEncoder();
-        macrosSyncStatus.textContent = 'Clearing on device...';
-        try {
-          await macrosChar.writeValueWithoutResponse(enc.encode('CLEAR'));
-          macrosSyncStatus.textContent = 'Cleared macros on device.';
-        } catch (e) {
-          macrosSyncStatus.textContent = `Clear failed: ${e}`;
+      // No explicit Clear button; delete rows and Save to clear on device
+
+      document.addEventListener('focusin', (e) => {
+        const t = e.target;
+        if (!t) return;
+        if (t === macroInEl || t === macroOutEl || t.classList?.contains('edit-in') || t.classList?.contains('edit-out')) {
+          lastMacroTargetEl = t;
         }
-      }
+      });
 
       function pasteHexToActive(hex) {
         const norm = normalizeHex(hex);
-        const ae = document.activeElement;
-        if (ae && (ae.getAttribute('data-role') === 'macro-in' || ae.getAttribute('data-role') === 'macro-out' || ae.classList.contains('edit-in') || ae.classList.contains('edit-out'))) {
-          ae.value = norm;
-          // Trigger validation if in creator
-          if (ae === macroInEl || ae === macroOutEl) updateCreatorControls();
+        const tgt = (lastMacroTargetEl && document.contains(lastMacroTargetEl)) ? lastMacroTargetEl : document.activeElement;
+        if (tgt && (tgt.getAttribute?.('data-role') === 'macro-in' || tgt.getAttribute?.('data-role') === 'macro-out' || tgt.classList?.contains('edit-in') || tgt.classList?.contains('edit-out'))) {
+          tgt.value = norm;
+          if (tgt === macroInEl || tgt === macroOutEl) updateCreatorControls();
           return;
         }
-        // Fallback: paste into the creator's currently focused field; if none, input
-        if (document.activeElement === macroOutEl) {
-          macroOutEl.value = norm;
-        } else {
-          macroInEl.value = norm;
-        }
+        // Default to input if nothing is focused
+        macroInEl.value = norm;
         updateCreatorControls();
       }
 
-      // Mark creator fields for paste targeting
+  // Mark creator fields for paste targeting
       macroInEl.setAttribute('data-role', 'macro-in');
       macroOutEl.setAttribute('data-role', 'macro-out');
 
@@ -893,14 +1103,14 @@
             logChar.addEventListener('characteristicvaluechanged', onLogNotification);
             logSubscribed = true;
             subscribeBtn.textContent = 'Unsubscribe';
-            notifyStatus.textContent = 'Subscribed';
+            
             setStatus('Subscribed to notifications.');
           } else {
             await logChar.stopNotifications();
             logChar.removeEventListener('characteristicvaluechanged', onLogNotification);
             logSubscribed = false;
             subscribeBtn.textContent = 'Subscribe';
-            notifyStatus.textContent = 'Not subscribed';
+            
             setStatus('Unsubscribed from notifications.');
           }
         } catch (e) {
@@ -914,7 +1124,7 @@
   disconnectBtn.addEventListener('click', disconnect);
       qs('refreshBtn').addEventListener('click', refresh);
       qs('clearBtn').addEventListener('click', clearDevices);
-      qs('subscribeBtn').addEventListener('click', toggleSubscribe);
+  qs('subscribeBtn').addEventListener('click', toggleSubscribe);
       autoRefreshChk.addEventListener('change', e => {
         if (e.target.checked) {
           startAuto();
@@ -922,26 +1132,22 @@
           stopAuto();
         }
       });
-      intervalSel.addEventListener('change', () => {
-        if (autoRefreshChk.checked) {
-          resetCountdown();
-        }
-      });
       clearTargetBtn.addEventListener('click', clearTarget);
-  downloadMacrosBtn.addEventListener('click', downloadMacros);
-  uploadMacrosBtn.addEventListener('click', uploadMacros);
-  clearDeviceMacrosBtn.addEventListener('click', clearDeviceMacros);
+  macrosRefreshBtn.addEventListener('click', downloadMacros);
+  macrosSaveBtn.addEventListener('click', uploadMacros);
 
       // Macros events
   addMacroBtn.addEventListener('click', addMacro);
   clearCreatorBtn.addEventListener('click', clearCreator);
-  newMacroNameEl.addEventListener('input', updateCreatorControls);
   macroInEl.addEventListener('input', updateCreatorControls);
   macroOutEl.addEventListener('input', updateCreatorControls);
 
-      loadMacros();
+  // Render empty devices table at startup for clarity
+  renderDevices([]);
+  loadMacros();
       // Initialize creator controls
-      updateCreatorControls();
+  updateCreatorControls();
+  // No device table; use single editable table
 
       enableControls(false);
     })();

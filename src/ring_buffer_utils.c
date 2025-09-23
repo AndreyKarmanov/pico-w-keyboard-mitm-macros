@@ -11,15 +11,9 @@ bool report_ring_buffer_write(report_ring_buffer_t* rb, uint8_t report_id, const
         return false;
     }
 
-    // Check for space: 1 for report_id, 1 for length, len for data
-    uint16_t free_space;
-    if (rb->head >= rb->tail) {
-        free_space = REPORT_RING_BUFFER_SIZE - (rb->head - rb->tail);
-    } else {
-        free_space = rb->tail - rb->head;
-    }
-
-    if (free_space < (len + 2)) {
+    // Check for space based on used_bytes
+    uint16_t free_space = REPORT_RING_BUFFER_SIZE - rb->used_bytes;
+    if (free_space <= (len + 2)) { // need strict space as we can't fully fill ring
         printf("Ring buffer full\n");
         return false;
     }
@@ -43,6 +37,7 @@ bool report_ring_buffer_write(report_ring_buffer_t* rb, uint8_t report_id, const
 
     rb->head = (rb->head + len) % REPORT_RING_BUFFER_SIZE;
     rb->item_count++;
+    rb->used_bytes = (uint16_t)(rb->used_bytes + len + 2);
     return true;
 }
 
@@ -61,6 +56,7 @@ int16_t report_ring_buffer_read(report_ring_buffer_t* rb, uint8_t* report_id, ui
         // Skip the data if buffer is too small
         rb->tail = (rb->tail + len) % REPORT_RING_BUFFER_SIZE;
         rb->item_count--;
+        rb->used_bytes = (uint16_t)(rb->used_bytes - (len + 2));
         return -2; // Error: buffer too small
     }
 
@@ -77,6 +73,7 @@ int16_t report_ring_buffer_read(report_ring_buffer_t* rb, uint8_t* report_id, ui
 
     rb->tail = (rb->tail + len) % REPORT_RING_BUFFER_SIZE;
     rb->item_count--;
+    rb->used_bytes = (uint16_t)(rb->used_bytes - (len + 2));
     return len;
 }
 

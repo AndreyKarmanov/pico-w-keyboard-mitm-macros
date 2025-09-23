@@ -22,7 +22,7 @@ typedef struct {
     hci_con_handle_t con_handle;
     uint8_t report_protocol_mode;
     uint32_t subscribed_reports_bitmap; // bitmask for report IDs
-    bool enabled_notifications;
+    bool enabled_notifications; // composite debug (CDF2)
 } host_device_t;
 
 #endif // MACRO_ITM_TYPES_H

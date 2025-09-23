@@ -20,26 +20,6 @@ void tlv_utils_init(void) {
     btstack_tlv_get_instance(&tlv_impl, &tlv_context);
 }
 
-target_device_t tlv_parse_device_string(const char* s, uint16_t s_len) {
-    target_device_t temp_device = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
-
-    char temp_addr_s[18];
-    char s_buf[65]; // max 64 chars + null terminator
-    if (s_len >= sizeof(s_buf)) {
-        return temp_device;
-    }
-    memcpy(s_buf, s, s_len);
-    s_buf[s_len] = '\0';
-
-    // "AA:BB:CC:DD:EE:FF,<type>,<name>"
-    int result = sscanf(s_buf, "%17[^,],%hhu,%31[^\r\n]", temp_addr_s, &temp_device.addr_type, temp_device.name);
-
-    if (result == 3) {
-        temp_device.valid = sscanf_bd_addr(temp_addr_s, temp_device.addr);
-    }
-
-    return temp_device;
-}
 
 void tlv_delete_target(void) {
     if (!tlv_impl) return;
@@ -48,19 +28,31 @@ void tlv_delete_target(void) {
 
 target_device_t tlv_load_target_device(void) {
     if (!tlv_impl) return (target_device_t) { { 0 }, 0, "", HCI_CON_HANDLE_INVALID, 0 };
-    uint8_t s_buf[64];
-    int len = tlv_impl->get_tag(tlv_context, TLV_TAG_TARGET_DEVICE, s_buf, sizeof(s_buf));
-    return tlv_parse_device_string((const char*)s_buf, (uint16_t)len);
+    uint8_t buf[64];
+    int len = tlv_impl->get_tag(tlv_context, TLV_TAG_TARGET_DEVICE, buf, sizeof(buf));
+    target_device_t dev = (target_device_t){ {0}, 0, "", HCI_CON_HANDLE_INVALID, 0 };
+    if (len < 8) return dev; // require addr(6)+type(1)+name_len(1)
+    memcpy(dev.addr, buf, 6);
+    dev.addr_type = buf[6];
+    uint8_t name_len = buf[7];
+    if (8 + name_len > len) name_len = (uint8_t)((len > 8) ? (len - 8) : 0);
+    uint8_t cpy = name_len < sizeof(dev.name) - 1 ? name_len : (uint8_t)(sizeof(dev.name) - 1);
+    if (cpy) memcpy(dev.name, &buf[8], cpy);
+    dev.name[cpy] = '\0';
+    dev.valid = true;
+    return dev;
 }
 
 void tlv_store_target_device(const target_device_t* device) {
     if (!tlv_impl || !device || !device->valid) return;
-    char s_buf[64];
-    int n = snprintf(s_buf, sizeof(s_buf), "%s,%u,%s", bd_addr_to_str(device->addr), (unsigned)device->addr_type, device->name);
-    if (n < 0) return;
-    size_t len = (size_t)n;
-    if (len > sizeof(s_buf)) len = sizeof(s_buf);
-    tlv_impl->store_tag(tlv_context, TLV_TAG_TARGET_DEVICE, (const uint8_t*)s_buf, (uint32_t)len);
+    uint8_t buf[64];
+    uint16_t p = 0;
+    memcpy(&buf[p], device->addr, 6); p += 6;
+    buf[p++] = (uint8_t)device->addr_type;
+    uint8_t name_len = (uint8_t)strnlen(device->name, sizeof(device->name));
+    buf[p++] = name_len;
+    if (name_len) { memcpy(&buf[p], device->name, name_len); p = (uint16_t)(p + name_len); }
+    tlv_impl->store_tag(tlv_context, TLV_TAG_TARGET_DEVICE, buf, p);
 }
 
 uint16_t tlv_load_hid_descriptor(uint8_t* buffer, uint16_t buffer_size) {
