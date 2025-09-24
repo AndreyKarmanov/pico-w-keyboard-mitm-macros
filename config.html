@@ -654,10 +654,34 @@
         console.log('[NOTIFY]', bytesToHex(bytes));
         setStatus('Last notification: ' + new Date().toLocaleTimeString());
 
-        // New composite format: [base_id][0xC0][raw_len][raw_payload][mod_id][mod_len][mod_payload]
+        // Composite formats supported:
+        // - New markerless: [base_id][raw_len][raw_payload][mod_id][mod_len][mod_payload]
+        // - Old marker:     [base_id][0xC0][raw_len][raw_payload][mod_id][mod_len][mod_payload]
+        // - Legacy fallback: treat bytes as raw report and compute modified locally
         let rawBytes = null;
         let modBytes = null;
-        if (bytes.length >= 2 && bytes[1] === 0xC0) {
+        // Try new markerless
+  let parsedOk = false;
+        if (bytes.length >= 3) {
+          let p = 0;
+          const baseId = bytes[p++] || 0;
+          const rawLen = bytes[p++];
+          if (p + rawLen <= bytes.length && p + rawLen + 2 <= bytes.length) {
+            const rawPayload = bytes.slice(p, p + rawLen); p += rawLen;
+            const modId = bytes[p++];
+            const modLen = bytes[p++];
+            if (p + modLen <= bytes.length) {
+              const modPayload = bytes.slice(p, p + modLen); p += modLen;
+              rawBytes = new Uint8Array(1 + rawPayload.length);
+              rawBytes[0] = baseId; rawBytes.set(rawPayload, 1);
+              modBytes = new Uint8Array(1 + modPayload.length);
+              modBytes[0] = modId; modBytes.set(modPayload, 1);
+              parsedOk = true;
+            }
+          }
+        }
+        // Try old marker-based if not parsed
+  if (!parsedOk && bytes.length >= 2 && bytes[1] === 0xC0) {
           let p = 2;
           const baseId = bytes[0] || 0;
           if (p >= bytes.length) return; // malformed
@@ -674,8 +698,10 @@
           rawBytes[0] = baseId; rawBytes.set(rawPayload, 1);
           modBytes = new Uint8Array(1 + modPayload.length);
           modBytes[0] = modId; modBytes.set(modPayload, 1);
-        } else {
-          // Fallback to legacy: bytes contain raw, compute modified locally
+          parsedOk = true;
+        }
+        // Legacy fallback
+  if (!parsedOk) {
           rawBytes = bytes;
           modBytes = applyMacrosLocally(bytes);
         }
