@@ -12,5 +12,4 @@ This is especially useful to address issues such as
 future additions
 - activity tracking
 - mouse rebindings
-- improved security in pairing
-- support for mimicking  the captured keyboard's BT advertisements
+
