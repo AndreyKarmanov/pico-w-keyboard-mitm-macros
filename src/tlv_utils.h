@@ -1,0 +1,30 @@
+#ifndef TLV_UTILS_H
+#define TLV_UTILS_H
+
+#include <stdint.h>
+#include <btstack.h>
+
+#include "macro_itm_types.h"
+
+// Initialize TLV backend implementation/context
+void tlv_utils_init(void);
+
+// Target device TLV now stored as binary: addr[6], addr_type(1), name_len(1), name[name_len]
+
+// Target device persistence helpers
+void tlv_delete_target(void);
+target_device_t tlv_load_target_device(void);
+void tlv_store_target_device(const target_device_t* dev);
+void tlv_save_target_if_needed(const target_device_t* current);
+
+// HID descriptor persistence helpers
+uint16_t tlv_load_hid_descriptor(uint8_t* buffer, uint16_t buffer_size);
+void tlv_store_hid_descriptor(const uint8_t* buffer, uint16_t buffer_size);
+
+// Macros (binary) persistence helpers. The stored blob is what the config page uploads.
+// See macro_itm.c for the exact binary layout (magic 'MBIN', version, count, entries).
+uint16_t tlv_load_macros_bin(uint8_t* buffer, uint16_t buffer_size);
+void tlv_store_macros_bin(const uint8_t* buffer, uint16_t buffer_size);
+
+
+#endif // TLV_UTILS_H

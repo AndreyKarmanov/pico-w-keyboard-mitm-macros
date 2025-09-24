@@ -15,43 +15,15 @@ future additions
 - improved security in pairing (code request)
 - support for mimicing the captured keyboard's BT advertisements
 
+# Setup
+- For some reason in BTStack HCI_EVENT_GATTSERVICE_META is used instead of HCI_EVENT_META when dispatching some events. 
+- Therefore in hids_client.h in the btstack repo, I updated two instances of HCI_EVENT_GATTSERVICE_META to HCI_EVENT_META for client reporting
+- Remember that you need to clean and rebuild after making changes to the btstack library
 
 # TODOs
-- [ ] configuration UI for choosing a device to connect to (via index.html)
-- [ ] configuration UI for setting up macros (open a basic index.html and use bluetooth api to adjust)
-- [ ] store macros in NVM
-- [ ] properly mirror keyboard's reports & advertisements
-  - [ ] support for multiple keyboards/layouts
-
-
-## Architecture
-
-Here is a state diagram outlining the desired robust architecture for handling connections and disconnections:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Disconnected
-
-    Disconnected: No connections active.
-    Disconnected --> Scanning_for_Keyboard: Start searching for keyboard
-
-    Scanning_for_Keyboard: Searching for a BLE HID keyboard to connect to.
-    Scanning_for_Keyboard --> Connecting_to_Keyboard: Keyboard found
-    Scanning_for_Keyboard --> Disconnected: Timeout or error
-
-    Connecting_to_Keyboard: Attempting to connect to the found keyboard.
-    Connecting_to_Keyboard --> Keyboard_Connected: Connection successful
-    Connecting_to_Keyboard --> Scanning_for_Keyboard: Connection failed
-
-    Keyboard_Connected: Connected to keyboard, not yet advertising to host.
-    Keyboard_Connected --> Advertising_to_Host: Start advertising
-    Keyboard_Connected --> Scanning_for_Keyboard: Keyboard disconnected
-
-    Advertising_to_Host: Waiting for a host (PC) to connect.
-    Advertising_to_Host --> Ready: Host connected
-    Advertising_to_Host --> Scanning_for_Keyboard: Keyboard disconnected
-
-    Ready: Connected to both keyboard and host. Ready to process and forward keystrokes.
-    Ready --> Advertising_to_Host: Host disconnected
-    Ready --> Scanning_for_Keyboard: Keyboard disconnected
-```
+- [x] Connect to BLE keyboard as a client
+- [x] Scan and select from available keyboards
+- [x] HOG connection to keyboard
+- [ ] mirror keyboard's reports & advertisements to host
+- [ ] configuration UI for setting up macros
+- [ ] macros stored in NVM

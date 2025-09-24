@@ -34,8 +34,14 @@ project(macro_itm C CXX ASM)
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
-
-add_executable(macro_itm macro_itm.c )
+add_executable(macro_itm
+    src/macro_itm.c
+    src/tlv_utils.c
+    src/print_utils.c
+    src/ring_buffer_utils.c
+    src/macros_engine.c
+    src/seen_devices.c
+)
 
 pico_set_program_name(macro_itm "macro_itm")
 pico_set_program_version(macro_itm "0.1")
@@ -55,6 +61,7 @@ target_link_libraries(macro_itm
 # Add the standard include files to the build
 target_include_directories(macro_itm PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/src
 )
 
 pico_btstack_make_gatt_header(macro_itm PRIVATE "${CMAKE_CURRENT_LIST_DIR}/macro_itm.gatt")
