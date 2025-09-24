@@ -797,7 +797,16 @@ static int att_write_callback(hci_con_handle_t connection_handle, uint16_t att_h
     case ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF3_01_VALUE_HANDLE: {
         // Binary control: 0x00=CLEAR, 0x01=BEGIN, 0x02=COMMIT, else = raw chunk
         if (buffer_size >= 1 && buffer[0] <= 0x02 && buffer_size == 1) {
-            if (buffer[0] == 0x00) { macros_engine_clear_and_persist_to_tlv(); printf("[MACROS] Cleared\n"); } else if (buffer[0] == 0x01) { macros_engine_begin_upload(); printf("[MACROS] Upload BEGIN\n"); } else if (buffer[0] == 0x02) { bool ok = macros_engine_commit_and_persist_to_tlv(); printf(ok ? "[MACROS] COMMIT\n" : "[MACROS] COMMIT failed: parse error\n"); }
+            if (buffer[0] == 0x00) {
+                macros_engine_clear_and_persist_to_tlv();
+                printf("[MACROS] Cleared\n");
+            } else if (buffer[0] == 0x01) {
+                macros_engine_begin_upload();
+                printf("[MACROS] Upload BEGIN\n");
+            } else if (buffer[0] == 0x02) {
+                bool ok = macros_engine_commit_and_persist_to_tlv();
+                printf(ok ? "[MACROS] COMMIT\n" : "[MACROS] COMMIT failed: parse error\n");
+            }
         } else {
             if (!macros_engine_append_chunk(buffer, buffer_size)) {
                 printf("[MACROS] Upload buffer overflow; dropped chunk len=%u\n", buffer_size);
@@ -817,7 +826,6 @@ static void att_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
     UNUSED(channel);
     UNUSED(size);
 
-    // reduce ATT event verbosity
     if (packet_type != HCI_EVENT_PACKET)
         return;
 
@@ -827,10 +835,12 @@ static void att_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* p
             uint8_t buf[1 + MAX_REPORT_LEN];
             int16_t len = rb_read(&debug_report_ring_buffer, buf, sizeof(buf));
             if (len > 0) {
-                att_server_notify(host.con_handle,
-                                  ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF2_01_VALUE_HANDLE,
-                                  buf,
-                                  (uint16_t)len);
+                att_server_notify(
+                    host.con_handle,
+                    ATT_CHARACTERISTIC_12345678_90AB_CDEF_0123_456789ABCDF2_01_VALUE_HANDLE,
+                    buf,
+                    len
+                );
             }
             if (!rb_is_empty(&debug_report_ring_buffer)) {
                 att_server_request_can_send_now_event(host.con_handle);
